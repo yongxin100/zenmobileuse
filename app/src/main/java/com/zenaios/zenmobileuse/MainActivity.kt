@@ -1081,6 +1081,10 @@ fun HistoryScreen(onBack: () -> Unit) {
 
 @Composable
 fun HistoryItem(dateStr: String, time: Long) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val sharedPreferences = remember { context.getSharedPreferences("zen_prefs", Context.MODE_PRIVATE) }
+    
     // Parse dateStr "yyyy-MM-dd" to display format
     val (datePart, weekdayPart) = remember(dateStr) {
         try {
@@ -1095,6 +1099,8 @@ fun HistoryItem(dateStr: String, time: Long) {
     }
 
     var showDetailedTime by remember { mutableStateOf(false) }
+    var showSyncButton by remember { mutableStateOf(false) }
+    var isSyncing by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1116,7 +1122,13 @@ fun HistoryItem(dateStr: String, time: Long) {
         ) {
             // Left Content: Date
             Column(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .pointerInput(Unit) {
+                        detectTapGestures(onDoubleTap = {
+                            showSyncButton = !showSyncButton
+                        })
+                    },
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 // Weekday (Top)
@@ -1146,6 +1158,50 @@ fun HistoryItem(dateStr: String, time: Long) {
                         maxLines = 1,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
+                }
+            }
+            
+            // Sync Button
+            if (showSyncButton) {
+                IconButton(
+                    onClick = {
+                        val serviceUrl = sharedPreferences.getString("service_url", null)
+                        if (serviceUrl == null) {
+                            android.widget.Toast.makeText(context, "请先在设置中扫描服务", android.widget.Toast.LENGTH_SHORT).show()
+                            return@IconButton
+                        }
+                        
+                        isSyncing = true
+                        scope.launch {
+                            val totalMinutes = time / (1000.0 * 60.0)
+                            val baseUrl = if (serviceUrl.startsWith("http")) serviceUrl else "http://$serviceUrl"
+                            
+                            NetworkScanner.syncUsageTime(baseUrl, totalMinutes, dateStr).collect { log ->
+                                if (log.type == LogType.SUCCESS) {
+                                    withContext(Dispatchers.Main) {
+                                        android.widget.Toast.makeText(context, "同步成功", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                    showSyncButton = false // Hide button on success
+                                } else if (log.type == LogType.FAILURE) {
+                                    withContext(Dispatchers.Main) {
+                                        android.widget.Toast.makeText(context, "同步失败: ${log.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                            isSyncing = false
+                        }
+                    },
+                    enabled = !isSyncing
+                ) {
+                    if (isSyncing) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.CloudUpload,
+                            contentDescription = "Sync",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             }
             
