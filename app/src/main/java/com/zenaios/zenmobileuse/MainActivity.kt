@@ -1111,6 +1111,8 @@ fun HistoryItem(dateStr: String, time: Long) {
     val maxMinutes = 10 * 60
     val currentMinutes = time / (1000 * 60)
     val percentage = (currentMinutes.toFloat() / maxMinutes.toFloat()).coerceIn(0f, 1f)
+    
+    var showDetailedTime by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1178,10 +1180,16 @@ fun HistoryItem(dateStr: String, time: Long) {
             Column(
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.Center,
-                modifier = Modifier.padding(start = 4.dp) // Minimum padding
+                modifier = Modifier
+                    .padding(start = 4.dp) // Minimum padding
+                    .pointerInput(Unit) {
+                        detectTapGestures(onDoubleTap = {
+                            showDetailedTime = !showDetailedTime
+                        })
+                    }
             ) {
                 AutoSizeSingleLineText(
-                    text = formatTime(time),
+                    text = if (showDetailedTime) formatTime(time) else formatMinutesOnly(time),
                     style = MaterialTheme.typography.titleLarge.copy(
                         fontWeight = FontWeight.Bold,
                         fontFeatureSettings = "tnum"
