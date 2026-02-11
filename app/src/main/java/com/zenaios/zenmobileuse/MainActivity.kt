@@ -66,6 +66,9 @@ import java.util.Locale
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
@@ -122,10 +125,17 @@ fun MainScreen() {
             modifier = Modifier.padding(innerPadding)
         ) {
             composable("时间") {
-                AppUsageScreen()
+                AppUsageScreen(onOpenHistory = {
+                    navController.navigate("history")
+                })
             }
             composable("设置") {
                 SettingsScreen()
+            }
+            composable("history") {
+                HistoryScreen(onBack = {
+                    navController.popBackStack()
+                })
             }
         }
     }
@@ -552,7 +562,7 @@ data class UsageStatsData(
 
 
 @Composable
-fun AppUsageScreen(modifier: Modifier = Modifier) {
+fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}) {
     val context = LocalContext.current
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     var hasPermission by remember { mutableStateOf(checkUsageStatsPermission(context)) }
@@ -591,7 +601,7 @@ fun AppUsageScreen(modifier: Modifier = Modifier) {
                 .fillMaxSize()
                 .padding(16.dp)
         ) {
-            TotalUsageHeader(usageData.totalUsageTime)
+            TotalUsageHeader(usageData.totalUsageTime, onOpenHistory)
             Spacer(modifier = Modifier.height(16.dp))
             AppUsageList(usageData.topApps, usageData.totalUsageTime)
         }
@@ -613,7 +623,7 @@ fun AppUsageScreen(modifier: Modifier = Modifier) {
 
 
 @Composable
-fun TotalUsageHeader(totalTime: Long) {
+fun TotalUsageHeader(totalTime: Long, onDoubleTap: () -> Unit = {}) {
     val animatedTotalTime by animateIntAsState(
         targetValue = totalTime.toInt(),
         animationSpec = tween(durationMillis = 1000, easing = FastOutSlowInEasing),
@@ -621,7 +631,13 @@ fun TotalUsageHeader(totalTime: Long) {
     )
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .pointerInput(Unit) {
+                detectTapGestures(onDoubleTap = { offset ->
+                    onDoubleTap()
+                })
+            },
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
@@ -940,4 +956,148 @@ fun PermissionRequestScreen(
             Text("我已授权，刷新")
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HistoryScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var historyItems by remember { mutableStateOf(listOf<Pair<String, Long>>()) }
+    var page by remember { mutableIntStateOf(0) }
+    var isLoading by remember { mutableStateOf(false) }
+    var isEndReached by remember { mutableStateOf(false) }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+    // Load function
+    suspend fun loadMore() {
+        if (isLoading || isEndReached) return
+        isLoading = true
+        val newItems = getHistoryData(context, page)
+        if (newItems.isEmpty()) {
+            isEndReached = true
+        } else {
+            historyItems = historyItems + newItems
+            page++
+        }
+        isLoading = false
+    }
+
+    // Initial load
+    LaunchedEffect(Unit) {
+        loadMore()
+    }
+
+    // Infinite scroll
+    val layoutInfo by remember { derivedStateOf { listState.layoutInfo } }
+    LaunchedEffect(layoutInfo) {
+        val lastVisibleItemIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        if (lastVisibleItemIndex >= historyItems.size - 2) {
+            loadMore()
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("历史使用时间") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize(),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(historyItems) { (date, time) ->
+                HistoryItem(date, time)
+            }
+
+            if (isLoading) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HistoryItem(date: String, time: Long) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(16.dp)
+                .fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = date,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+            )
+            
+            Text(
+                text = formatTime(time),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+suspend fun getHistoryData(context: Context, page: Int, pageSize: Int = 10): List<Pair<String, Long>> = withContext(Dispatchers.IO) {
+    val list = mutableListOf<Pair<String, Long>>()
+    val calendar = Calendar.getInstance()
+    calendar.set(Calendar.HOUR_OF_DAY, 0)
+    calendar.set(Calendar.MINUTE, 0)
+    calendar.set(Calendar.SECOND, 0)
+    calendar.set(Calendar.MILLISECOND, 0)
+
+    // Offset by page * pageSize
+    calendar.add(Calendar.DAY_OF_YEAR, -(page * pageSize))
+
+    for (i in 0 until pageSize) {
+        val startTime = calendar.timeInMillis
+        val endTime = startTime + 24 * 60 * 60 * 1000 - 1 // End of day
+
+        // Skip future
+        if (startTime > System.currentTimeMillis()) {
+            calendar.add(Calendar.DAY_OF_YEAR, -1)
+            continue
+        }
+        
+        // Use queryEvents logic for consistency
+        val usageMap = calculateUsageTimeWithEvents(context, startTime, endTime)
+        val totalTime = usageMap.values.sum()
+
+        val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(startTime))
+        list.add(dateStr to totalTime)
+
+        calendar.add(Calendar.DAY_OF_YEAR, -1)
+    }
+    list
 }
