@@ -67,6 +67,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.clip
@@ -76,6 +77,10 @@ import androidx.compose.animation.core.animateIntAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.FastOutSlowInEasing
 import kotlinx.coroutines.delay
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.background
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -675,78 +680,129 @@ fun TotalUsageHeader(totalTime: Long, onDoubleTap: () -> Unit = {}) {
 fun AppUsageList(usageList: List<AppUsageInfo>, totalUsageTime: Long, modifier: Modifier = Modifier) {
     LazyColumn(
         modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        items(usageList) { appUsage ->
-            AppUsageItem(appUsage, totalUsageTime)
+        itemsIndexed(usageList) { index, appUsage ->
+            AppUsageItem(appUsage, totalUsageTime, index + 1)
         }
     }
 }
 
 @Composable
-fun AppUsageItem(appUsage: AppUsageInfo, totalUsageTime: Long) {
+fun AppUsageItem(appUsage: AppUsageInfo, totalUsageTime: Long, rank: Int) {
+    val percentage = if (totalUsageTime > 0) appUsage.usageTime.toFloat() / totalUsageTime.toFloat() else 0f
+    
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-        shape = RoundedCornerShape(12.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.5.dp),
+        shape = RoundedCornerShape(16.dp),
+        border = androidx.compose.foundation.BorderStroke(
+            width = 0.5.dp, 
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+        )
     ) {
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
+                .padding(12.dp)
+                .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Rank
+            Text(
+                text = "$rank",
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontWeight = FontWeight.Bold,
+                    fontFeatureSettings = "tnum"
+                ),
+                color = when (rank) {
+                    1 -> Color(0xFFFFD700) // Gold
+                    2 -> Color(0xFFC0C0C0) // Silver
+                    3 -> Color(0xFFCD7F32) // Bronze
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                },
+                modifier = Modifier.width(24.dp),
+                textAlign = TextAlign.Center
+            )
+            
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Icon
             if (appUsage.icon != null) {
                 Image(
                     bitmap = appUsage.icon.toBitmap().asImageBitmap(),
                     contentDescription = null,
                     modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(8.dp))
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(12.dp))
                 )
             } else {
-                Icon(
-                    imageVector = Icons.Default.Apps,
-                    contentDescription = null,
-                    modifier = Modifier.size(48.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
-            Spacer(modifier = Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = appUsage.appName,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                // Progress bar for individual app relative to total usage
-                val appProgress = if (totalUsageTime > 0) appUsage.usageTime.toFloat() / totalUsageTime.toFloat() else 0f
-                LinearProgressIndicator(
-                    progress = { appProgress },
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp)),
-                    color = MaterialTheme.colorScheme.secondary,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                )
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Apps,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
             }
-            Spacer(modifier = Modifier.width(16.dp))
-            AutoSizeSingleLineText(
-                text = formatMinutesOnly(appUsage.usageTime),
-                style = MaterialTheme.typography.labelLarge.copy(
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                ),
-                color = MaterialTheme.colorScheme.primary,
-                maxFontSize = MaterialTheme.typography.labelLarge.fontSize,
-                minFontSize = 10.sp
-            )
+            Spacer(modifier = Modifier.width(12.dp))
+            
+            // Content
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    Text(
+                        text = appUsage.appName,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = formatMinutesOnly(appUsage.usageTime),
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LinearProgressIndicator(
+                        progress = { percentage },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "${(percentage * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.width(32.dp),
+                        textAlign = TextAlign.End
+                    )
+                }
+            }
         }
     }
 }
@@ -1037,34 +1093,107 @@ fun HistoryScreen(onBack: () -> Unit) {
 }
 
 @Composable
-fun HistoryItem(date: String, time: Long) {
+fun HistoryItem(dateStr: String, time: Long) {
+    // Parse dateStr "yyyy-MM-dd" to display format
+    val dateDisplay = remember(dateStr) {
+        try {
+            val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(dateStr)
+            SimpleDateFormat("MM月dd日 EEEE", Locale.CHINESE).format(date ?: Date())
+        } catch (e: Exception) {
+            dateStr
+        }
+    }
+
+    // Calculate percentage based on 10 hours (600 minutes) as a "full day" usage benchmark
+    // You can adjust this benchmark
+    val maxMinutes = 10 * 60
+    val currentMinutes = time / (1000 * 60)
+    val percentage = (currentMinutes.toFloat() / maxMinutes.toFloat()).coerceIn(0f, 1f)
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-        shape = RoundedCornerShape(12.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.5.dp),
+        shape = RoundedCornerShape(16.dp),
+        border = androidx.compose.foundation.BorderStroke(
+            width = 0.5.dp, 
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+        )
     ) {
         Row(
             modifier = Modifier
                 .padding(16.dp)
                 .fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = date,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
-            )
+            // Left Content: Date and Progress
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.DateRange,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = dateDisplay,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.SemiBold
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                }
+
+                // Progress Bar with dynamic color
+                val progressColor = when {
+                    percentage > 0.8f -> MaterialTheme.colorScheme.error // > 8 hours (red)
+                    percentage > 0.5f -> Color(0xFFFF9800) // > 5 hours (orange)
+                    else -> MaterialTheme.colorScheme.primary // (primary)
+                }
+                
+                LinearProgressIndicator(
+                    progress = { percentage },
+                    modifier = Modifier
+                        .fillMaxWidth(0.9f) // Leave some space
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = progressColor,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
+            }
             
-            Text(
-                text = formatTime(time),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
-            )
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Right Content: Time and Percentage
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(start = 4.dp) // Minimum padding
+            ) {
+                AutoSizeSingleLineText(
+                    text = formatTime(time),
+                    textStyle = MaterialTheme.typography.titleLarge.copy(
+                        fontWeight = FontWeight.Bold,
+                        fontFeatureSettings = "tnum"
+                    ),
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.widthIn(max = 120.dp) // Constrain width if needed, but AutoSize handles it
+                )
+                
+                Text(
+                    text = "${(percentage * 100).toInt()}%",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
