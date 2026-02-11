@@ -1097,12 +1097,15 @@ fun HistoryScreen(onBack: () -> Unit) {
 @Composable
 fun HistoryItem(dateStr: String, time: Long) {
     // Parse dateStr "yyyy-MM-dd" to display format
-    val dateDisplay = remember(dateStr) {
+    val (datePart, weekdayPart) = remember(dateStr) {
         try {
-            val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(dateStr)
-            SimpleDateFormat("MM/dd EEEE", Locale.CHINESE).format(date ?: Date())
+            val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(dateStr) ?: Date()
+            val d = SimpleDateFormat("MM/dd", Locale.CHINA).format(date)
+            // Use "E" for "周x" in CHINA locale, replace "星期" just in case to ensure "周" format
+            val w = SimpleDateFormat("E", Locale.CHINA).format(date).replace("星期", "周")
+            d to w
         } catch (e: Exception) {
-            dateStr
+            dateStr to ""
         }
     }
 
@@ -1135,18 +1138,28 @@ fun HistoryItem(dateStr: String, time: Long) {
             // Left Content: Date and Progress
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                // Weekday (Top)
+                Text(
+                    text = weekdayPart,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontWeight = FontWeight.Medium
+                    ),
+                    color = MaterialTheme.colorScheme.secondary
+                )
+
+                // Date (Below Weekday)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Default.DateRange,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.size(18.dp)
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = dateDisplay,
+                        text = datePart,
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.SemiBold
                         ),
@@ -1155,6 +1168,8 @@ fun HistoryItem(dateStr: String, time: Long) {
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                 }
+                
+                Spacer(modifier = Modifier.height(2.dp))
 
                 // Progress Bar with dynamic color
                 val progressColor = when {
