@@ -32,7 +32,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -65,6 +69,10 @@ import androidx.compose.material.icons.filled.Apps
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.animation.core.animateIntAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FastOutSlowInEasing
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -566,6 +574,17 @@ fun AppUsageScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // Auto-refresh every minute
+    LaunchedEffect(hasPermission) {
+        if (hasPermission) {
+            usageData = getDailyUsageStats(context)
+            while (true) {
+                delay(60000) // 1 minute
+                usageData = getDailyUsageStats(context)
+            }
+        }
+    }
+
     if (hasPermission) {
         Column(
             modifier = modifier
@@ -595,6 +614,12 @@ fun AppUsageScreen(modifier: Modifier = Modifier) {
 
 @Composable
 fun TotalUsageHeader(totalTime: Long) {
+    val animatedTotalTime by animateIntAsState(
+        targetValue = totalTime.toInt(),
+        animationSpec = tween(durationMillis = 1000, easing = FastOutSlowInEasing),
+        label = "TotalTimeAnimation"
+    )
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -617,11 +642,14 @@ fun TotalUsageHeader(totalTime: Long) {
             )
             Spacer(modifier = Modifier.height(12.dp))
             
-            Text(
-                text = formatTime(totalTime),
-                style = MaterialTheme.typography.displayMedium,
+            AutoSizeSingleLineText(
+                text = formatTime(animatedTotalTime.toLong()),
+                style = MaterialTheme.typography.displayMedium.copy(
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.ExtraBold
+                ),
                 color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.ExtraBold
+                maxFontSize = MaterialTheme.typography.displayMedium.fontSize,
+                minFontSize = 18.sp
             )
         }
     }
@@ -694,14 +722,44 @@ fun AppUsageItem(appUsage: AppUsageInfo, totalUsageTime: Long) {
                 )
             }
             Spacer(modifier = Modifier.width(16.dp))
-            Text(
-                text = formatTime(appUsage.usageTime),
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
+            AutoSizeSingleLineText(
+                text = formatMinutesOnly(appUsage.usageTime),
+                style = MaterialTheme.typography.labelLarge.copy(
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                ),
+                color = MaterialTheme.colorScheme.primary,
+                maxFontSize = MaterialTheme.typography.labelLarge.fontSize,
+                minFontSize = 10.sp
             )
         }
     }
+}
+
+@Composable
+fun AutoSizeSingleLineText(
+    text: String,
+    style: TextStyle,
+    color: Color,
+    maxFontSize: TextUnit,
+    minFontSize: TextUnit
+) {
+    val resolvedMaxFontSize =
+        if (style.fontSize != TextUnit.Unspecified) style.fontSize else maxFontSize
+    var fontSize by remember(text, style, resolvedMaxFontSize) { mutableStateOf(resolvedMaxFontSize) }
+
+    Text(
+        text = text,
+        style = style.copy(fontSize = fontSize),
+        color = color,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Clip,
+        onTextLayout = { result ->
+            if (result.hasVisualOverflow && fontSize.value > minFontSize.value) {
+                fontSize = (fontSize.value - 1).sp
+            }
+        }
+    )
 }
 
 fun formatTime(millis: Long): String {
@@ -710,10 +768,15 @@ fun formatTime(millis: Long): String {
     val hours = minutes / 60
     val remainingMinutes = minutes % 60
     return if (hours > 0) {
-        "${hours}小时 ${remainingMinutes}分钟"
+        "${hours}小时${remainingMinutes}分钟"
     } else {
         "${remainingMinutes}分钟"
     }
+}
+
+fun formatMinutesOnly(millis: Long): String {
+    val minutes = millis / 60000
+    return "${minutes}分钟"
 }
 
 fun checkUsageStatsPermission(context: Context): Boolean {
@@ -726,8 +789,45 @@ fun checkUsageStatsPermission(context: Context): Boolean {
     return mode == AppOpsManager.MODE_ALLOWED
 }
 
-fun getDailyUsageStats(context: Context): UsageStatsData {
+fun calculateUsageTimeWithEvents(context: Context, startTime: Long, endTime: Long): Map<String, Long> {
     val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+    val usageEvents = usageStatsManager.queryEvents(startTime, endTime)
+    val usageMap = mutableMapOf<String, Long>()
+    val lastEventMap = mutableMapOf<String, Long>()
+
+    while (usageEvents.hasNextEvent()) {
+        val event = android.app.usage.UsageEvents.Event()
+        usageEvents.getNextEvent(event)
+
+        when (event.eventType) {
+            android.app.usage.UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                lastEventMap[event.packageName] = event.timeStamp
+            }
+            android.app.usage.UsageEvents.Event.MOVE_TO_BACKGROUND -> {
+                val start = lastEventMap[event.packageName]
+                if (start != null) {
+                    val duration = event.timeStamp - start
+                    if (duration > 0) {
+                        usageMap[event.packageName] = usageMap.getOrDefault(event.packageName, 0L) + duration
+                    }
+                    lastEventMap.remove(event.packageName)
+                }
+            }
+        }
+    }
+
+    // Process apps that are still in foreground
+    lastEventMap.forEach { (packageName, start) ->
+        val duration = endTime - start
+        if (duration > 0) {
+            usageMap[packageName] = usageMap.getOrDefault(packageName, 0L) + duration
+        }
+    }
+
+    return usageMap
+}
+
+fun getDailyUsageStats(context: Context): UsageStatsData {
     val calendar = Calendar.getInstance()
     calendar.set(Calendar.HOUR_OF_DAY, 0)
     calendar.set(Calendar.MINUTE, 0)
@@ -736,40 +836,69 @@ fun getDailyUsageStats(context: Context): UsageStatsData {
     val startTime = calendar.timeInMillis
     val endTime = System.currentTimeMillis()
 
-    val usageStatsList = usageStatsManager.queryUsageStats(
-        UsageStatsManager.INTERVAL_DAILY,
-        startTime,
-        endTime
-    )
+    // Use queryEvents for more accurate calculation
+    val usageMap = calculateUsageTimeWithEvents(context, startTime, endTime)
 
     val packageManager = context.packageManager
     val appUsageList = mutableListOf<AppUsageInfo>()
-    
-    // Aggregate usage time by package name
-    val usageMap = mutableMapOf<String, Long>()
-    
-    usageStatsList.forEach { usageStats ->
-        val current = usageMap.getOrDefault(usageStats.packageName, 0L)
-        usageMap[usageStats.packageName] = current + usageStats.totalTimeInForeground
+
+    val isUserApp: (android.content.pm.ApplicationInfo) -> Boolean = { appInfo ->
+        (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 ||
+            (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
     }
 
     // Exclude self and system settings
     val excludedPackages = setOf(context.packageName, "com.android.settings")
 
     usageMap.forEach { (packageName, time) ->
-        if (time > 0 && packageName !in excludedPackages) {
+        if (time >= 0 && packageName !in excludedPackages) {
             try {
                 val appInfo = packageManager.getApplicationInfo(packageName, 0)
-                val appName = packageManager.getApplicationLabel(appInfo).toString()
-                val icon = packageManager.getApplicationIcon(appInfo)
-                appUsageList.add(AppUsageInfo(packageName, appName, time, icon))
+                if (isUserApp(appInfo)) {
+                    val appName = packageManager.getApplicationLabel(appInfo).toString()
+                    val icon = packageManager.getApplicationIcon(appInfo)
+                    appUsageList.add(AppUsageInfo(packageName, appName, time, icon))
+                }
             } catch (e: PackageManager.NameNotFoundException) {
-                // Ignore if app not found
+                // Fallback for apps that are installed but not fully resolved (should happen less with QUERY_ALL_PACKAGES)
+                // Or uninstalled apps that still have usage stats
+                // We show them to ensure data completeness
+                appUsageList.add(AppUsageInfo(packageName, packageName, time, null))
             }
         }
     }
 
-    val sortedList = appUsageList.sortedByDescending { it.usageTime }.take(10)
+    val targetCount = 20
+    val sortedList = appUsageList.sortedByDescending { it.usageTime }.take(targetCount).toMutableList()
+    if (sortedList.size < targetCount) {
+        val existingPackages = sortedList.map { it.packageName }.toHashSet()
+        val installedApps = packageManager.getInstalledApplications(0)
+        val nonSystemApps = installedApps.filter {
+            it.packageName !in excludedPackages &&
+                it.packageName !in existingPackages &&
+                isUserApp(it)
+        }
+        fun addApps(apps: List<android.content.pm.ApplicationInfo>) {
+            for (appInfo in apps) {
+                if (sortedList.size >= targetCount) {
+                    break
+                }
+                val appName = packageManager.getApplicationLabel(appInfo).toString()
+                val icon = packageManager.getApplicationIcon(appInfo)
+                sortedList.add(AppUsageInfo(appInfo.packageName, appName, 0L, icon))
+                existingPackages.add(appInfo.packageName)
+            }
+        }
+        addApps(nonSystemApps)
+        if (sortedList.size < targetCount) {
+            val systemApps = installedApps.filter {
+                it.packageName !in excludedPackages &&
+                    it.packageName !in existingPackages &&
+                    !isUserApp(it)
+            }
+            addApps(systemApps)
+        }
+    }
     val totalTime = sortedList.sumOf { it.usageTime }
 
     return UsageStatsData(sortedList, totalTime)
@@ -812,5 +941,3 @@ fun PermissionRequestScreen(
         }
     }
 }
-
-
