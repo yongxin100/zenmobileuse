@@ -1100,7 +1100,7 @@ fun HistoryItem(dateStr: String, time: Long) {
     val dateDisplay = remember(dateStr) {
         try {
             val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(dateStr)
-            SimpleDateFormat("MM月dd日 EEEE", Locale.CHINESE).format(date ?: Date())
+            SimpleDateFormat("MM/dd EEEE", Locale.CHINESE).format(date ?: Date())
         } catch (e: Exception) {
             dateStr
         }
