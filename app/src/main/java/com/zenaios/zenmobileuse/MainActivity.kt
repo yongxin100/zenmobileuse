@@ -813,7 +813,8 @@ fun AutoSizeSingleLineText(
     style: TextStyle,
     color: Color,
     maxFontSize: TextUnit,
-    minFontSize: TextUnit
+    minFontSize: TextUnit,
+    modifier: Modifier = Modifier
 ) {
     val resolvedMaxFontSize =
         if (style.fontSize != TextUnit.Unspecified) style.fontSize else maxFontSize
@@ -826,6 +827,7 @@ fun AutoSizeSingleLineText(
         maxLines = 1,
         softWrap = false,
         overflow = TextOverflow.Clip,
+        modifier = modifier,
         onTextLayout = { result ->
             if (result.hasVisualOverflow && fontSize.value > minFontSize.value) {
                 fontSize = (fontSize.value - 1).sp
@@ -1180,12 +1182,14 @@ fun HistoryItem(dateStr: String, time: Long) {
             ) {
                 AutoSizeSingleLineText(
                     text = formatTime(time),
-                    textStyle = MaterialTheme.typography.titleLarge.copy(
+                    style = MaterialTheme.typography.titleLarge.copy(
                         fontWeight = FontWeight.Bold,
                         fontFeatureSettings = "tnum"
                     ),
                     color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.widthIn(max = 120.dp) // Constrain width if needed, but AutoSize handles it
+                    maxFontSize = MaterialTheme.typography.titleLarge.fontSize,
+                    minFontSize = 12.sp,
+                    modifier = Modifier.widthIn(max = 120.dp)
                 )
                 
                 Text(
