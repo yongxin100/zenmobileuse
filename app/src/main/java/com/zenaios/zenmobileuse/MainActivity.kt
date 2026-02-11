@@ -608,7 +608,7 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
         ) {
             TotalUsageHeader(usageData.totalUsageTime, onOpenHistory)
             Spacer(modifier = Modifier.height(16.dp))
-            AppUsageList(usageData.topApps, usageData.totalUsageTime)
+            AppUsageList(usageData.topApps)
         }
     } else {
         PermissionRequestScreen(
@@ -664,7 +664,7 @@ fun TotalUsageHeader(totalTime: Long, onDoubleTap: () -> Unit = {}) {
             Spacer(modifier = Modifier.height(12.dp))
             
             AutoSizeSingleLineText(
-                text = formatTime(animatedTotalTime.toLong()),
+                text = formatMinutesOnly(animatedTotalTime.toLong()),
                 style = MaterialTheme.typography.displayMedium.copy(
                     fontWeight = androidx.compose.ui.text.font.FontWeight.ExtraBold
                 ),
@@ -677,24 +677,30 @@ fun TotalUsageHeader(totalTime: Long, onDoubleTap: () -> Unit = {}) {
 }
 
 @Composable
-fun AppUsageList(usageList: List<AppUsageInfo>, totalUsageTime: Long, modifier: Modifier = Modifier) {
+fun AppUsageList(usageList: List<AppUsageInfo>, modifier: Modifier = Modifier) {
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         itemsIndexed(usageList) { index, appUsage ->
-            AppUsageItem(appUsage, totalUsageTime, index + 1)
+            AppUsageItem(appUsage, index + 1)
         }
     }
 }
 
 @Composable
-fun AppUsageItem(appUsage: AppUsageInfo, totalUsageTime: Long, rank: Int) {
-    val percentage = if (totalUsageTime > 0) appUsage.usageTime.toFloat() / totalUsageTime.toFloat() else 0f
-    
+fun AppUsageItem(appUsage: AppUsageInfo, rank: Int) {
+    var showDetailedTime by remember { mutableStateOf(false) }
+
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .pointerInput(Unit) {
+                detectTapGestures(onDoubleTap = {
+                    showDetailedTime = !showDetailedTime
+                })
+            },
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
@@ -774,32 +780,11 @@ fun AppUsageItem(appUsage: AppUsageInfo, totalUsageTime: Long, rank: Int) {
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = formatMinutesOnly(appUsage.usageTime),
+                        text = if (showDetailedTime) formatTime(appUsage.usageTime) else formatMinutesOnly(appUsage.usageTime),
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.Bold
                         ),
                         color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                Spacer(modifier = Modifier.height(6.dp))
-                
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    LinearProgressIndicator(
-                        progress = { percentage },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp)),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "${(percentage * 100).toInt()}%",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.width(32.dp),
-                        textAlign = TextAlign.End
                     )
                 }
             }
@@ -973,7 +958,7 @@ fun getDailyUsageStats(context: Context): UsageStatsData {
             addApps(systemApps)
         }
     }
-    val totalTime = sortedList.sumOf { it.usageTime }
+    val totalTime = usageMap.values.sum()
 
     return UsageStatsData(sortedList, totalTime)
 }
@@ -1109,12 +1094,6 @@ fun HistoryItem(dateStr: String, time: Long) {
         }
     }
 
-    // Calculate percentage based on 10 hours (600 minutes) as a "full day" usage benchmark
-    // You can adjust this benchmark
-    val maxMinutes = 10 * 60
-    val currentMinutes = time / (1000 * 60)
-    val percentage = (currentMinutes.toFloat() / maxMinutes.toFloat()).coerceIn(0f, 1f)
-    
     var showDetailedTime by remember { mutableStateOf(false) }
 
     Card(
@@ -1135,7 +1114,7 @@ fun HistoryItem(dateStr: String, time: Long) {
                 .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left Content: Date and Progress
+            // Left Content: Date
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -1168,30 +1147,11 @@ fun HistoryItem(dateStr: String, time: Long) {
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                 }
-                
-                Spacer(modifier = Modifier.height(2.dp))
-
-                // Progress Bar with dynamic color
-                val progressColor = when {
-                    percentage > 0.8f -> MaterialTheme.colorScheme.error // > 8 hours (red)
-                    percentage > 0.5f -> Color(0xFFFF9800) // > 5 hours (orange)
-                    else -> MaterialTheme.colorScheme.primary // (primary)
-                }
-                
-                LinearProgressIndicator(
-                    progress = { percentage },
-                    modifier = Modifier
-                        .fillMaxWidth(0.9f) // Leave some space
-                        .height(6.dp)
-                        .clip(RoundedCornerShape(3.dp)),
-                    color = progressColor,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                )
             }
             
             Spacer(modifier = Modifier.width(8.dp))
 
-            // Right Content: Time and Percentage
+            // Right Content: Time
             Column(
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.Center,
@@ -1214,12 +1174,6 @@ fun HistoryItem(dateStr: String, time: Long) {
                     minFontSize = 12.sp,
                     modifier = Modifier.widthIn(max = 120.dp)
                 )
-                
-                Text(
-                    text = "${(percentage * 100).toInt()}%",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
         }
     }
@@ -1238,10 +1192,13 @@ suspend fun getHistoryData(context: Context, page: Int, pageSize: Int = 10): Lis
 
     for (i in 0 until pageSize) {
         val startTime = calendar.timeInMillis
-        val endTime = startTime + 24 * 60 * 60 * 1000 - 1 // End of day
+        // End of day, but cap at current time for today to avoid inflating usage time with future hours
+        val endOfDay = startTime + 24 * 60 * 60 * 1000 - 1
+        val currentTime = System.currentTimeMillis()
+        val endTime = if (endOfDay > currentTime) currentTime else endOfDay
 
         // Skip future
-        if (startTime > System.currentTimeMillis()) {
+        if (startTime > currentTime) {
             calendar.add(Calendar.DAY_OF_YEAR, -1)
             continue
         }
