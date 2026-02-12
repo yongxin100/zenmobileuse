@@ -635,7 +635,7 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
                             NetworkScanner.syncUsageTime(baseUrl, totalMinutes, dateStr).collect { log ->
                                 scanLogs = scanLogs + log
                             }
-                            NetworkScanner.syncAppUsage(baseUrl, dateStr, usageStats.sortedList).collect { log ->
+                            NetworkScanner.syncAppUsage(baseUrl, dateStr, usageStats.topApps).collect { log ->
                                 scanLogs = scanLogs + log
                             }
                         }
