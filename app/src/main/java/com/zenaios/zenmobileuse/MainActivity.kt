@@ -1562,4 +1562,3 @@ fun processImageProxy(imageProxy: ImageProxy, onResult: (String) -> Unit) {
         imageProxy.close()
     }
 }
-EOF~
