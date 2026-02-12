@@ -18,10 +18,12 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.background
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -31,6 +33,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,7 +81,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.FastOutSlowInEasing
 import kotlinx.coroutines.delay
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.background
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import android.Manifest
@@ -95,7 +97,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
-import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.ExperimentalMaterial3Api
 
 class MainActivity : ComponentActivity() {
@@ -425,6 +426,9 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
     var scanLogs by remember { mutableStateOf(listOf<ScanLog>()) }
     var foundServiceUrl by remember { mutableStateOf(sharedPreferences.getString("service_url", null)) }
     var scanJob by remember { mutableStateOf<Job?>(null) }
+    val fontScale = LocalConfiguration.current.fontScale
+    val isLargeFont = fontScale >= 1.15f
+    val visibleLogs = if (scanLogs.size > 5) scanLogs.takeLast(5) else scanLogs
     
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -442,249 +446,351 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
     LaunchedEffect(scanLogs.size) {
-        if (scanLogs.isNotEmpty()) {
-            listState.animateScrollToItem(scanLogs.size - 1)
+        if (visibleLogs.isNotEmpty()) {
+            val totalItems = 9 + visibleLogs.size
+            if (totalItems > 0) {
+                listState.animateScrollToItem(totalItems - 1)
+            }
         }
     }
 
-    Column(
+    LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .background(MaterialTheme.colorScheme.background),
+        contentPadding = PaddingValues(bottom = 24.dp),
     ) {
-        Text(
-            "设置 & 工具", 
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 24.dp)
-        )
-        
-        // 1. Service Connection Status (Top Priority)
-        OutlinedCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp),
-            colors = CardDefaults.outlinedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
+        item {
+            Text(
+                "设置", 
+                style = MaterialTheme.typography.displaySmall,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 24.dp, top = 32.dp, bottom = 16.dp)
             )
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp)
-            ) {
-                // Header
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(
-                        imageVector = if (foundServiceUrl != null) Icons.Default.CheckCircle else Icons.Default.Error,
-                        contentDescription = null,
-                        tint = if (foundServiceUrl != null) Color(0xFF4CAF50) else MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "服务端连接",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
-                    )
-                }
-                
-                Spacer(modifier = Modifier.height(12.dp))
-                
-                // Status Text
-                if (foundServiceUrl != null) {
-                    Text(
-                        text = "已连接: $foundServiceUrl",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                } else {
-                    Text(
-                        text = "未连接服务端，请先配置连接",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                // Actions
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    // QR Scan (Primary)
-                    Button(
-                        onClick = onOpenScanner,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("扫码连接")
+        }
+        
+        item {
+            Text(
+                "数据同步",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 24.dp, bottom = 8.dp)
+            )
+        }
+
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (foundServiceUrl != null) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
                     }
-                    
-                    // LAN Scan (Secondary)
-                    OutlinedButton(
+                ),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    if (isLargeFont) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.CloudUpload,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                "同步今日数据",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "上传应用使用时长统计",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.CloudUpload,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "同步今日数据",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    "上传应用使用时长统计",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = if (foundServiceUrl == null) "请先连接服务端后再同步" else "已连接服务端，可立即同步",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (foundServiceUrl == null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = if (isLargeFont) 3 else 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
                         onClick = {
-                            if (isScanning) {
-                                scanJob?.cancel()
-                                isScanning = false
-                                scanLogs = scanLogs + ScanLog("Scan stopped by user.", LogType.INFO)
-                            } else {
-                                isScanning = true
-                                foundServiceUrl = null
-                                scanLogs = listOf(ScanLog("Starting manual scan...", LogType.INFO))
-                                scanJob = scope.launch {
-                                    try {
-                                        NetworkScanner.scanLocalNetwork(context).collect { log ->
-                                            scanLogs = scanLogs + log
-                                            if (log.type == LogType.SUCCESS) {
-                                                val url = log.message.substringBefore(" OK")
-                                                foundServiceUrl = url
-                                                sharedPreferences.edit().putString("service_url", url).apply()
-                                            }
-                                        }
-                                    } finally {
-                                        isScanning = false
-                                    }
+                            if (foundServiceUrl == null) {
+                                scanLogs = scanLogs + ScanLog("Error: No service URL found. Please connect first.", LogType.FAILURE)
+                                return@Button
+                            }
+                            if (!checkUsageStatsPermission(context)) {
+                                scanLogs = scanLogs + ScanLog("Error: Usage stats permission not granted.", LogType.FAILURE)
+                                return@Button
+                            }
+
+                            scope.launch {
+                                val usageStats = getDailyUsageStats(context)
+                                val totalMinutes = usageStats.totalUsageTime / (1000.0 * 60.0)
+                                val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+
+                                val baseUrl = if (foundServiceUrl!!.startsWith("http")) foundServiceUrl!! else "http://$foundServiceUrl"
+
+                                NetworkScanner.syncUsageTime(baseUrl, totalMinutes, dateStr).collect { log ->
+                                    scanLogs = scanLogs + log
+                                }
+                                NetworkScanner.syncAppUsage(baseUrl, dateStr, usageStats.topApps).collect { log ->
+                                    scanLogs = scanLogs + log
                                 }
                             }
                         },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                             contentColor = if (isScanning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                        )
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = foundServiceUrl != null
                     ) {
-                        if (isScanning) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                color = MaterialTheme.colorScheme.error,
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("停止")
-                        } else {
-                            Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("局域网扫描")
-                        }
+                        Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("立即同步", maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
         }
 
-        // 2. Data Sync (Dependent on Connection)
-        OutlinedCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp),
-             colors = CardDefaults.outlinedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
+        item {
+            Text(
+                "连接服务端",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 24.dp, top = 24.dp, bottom = 8.dp)
             )
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp)
+        }
+
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                ),
+                shape = RoundedCornerShape(12.dp)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.CloudUpload,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (foundServiceUrl != null) Icons.Default.CheckCircle else Icons.Default.Error,
+                            contentDescription = null,
+                            tint = if (foundServiceUrl != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "连接状态",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = if (isLargeFont) 2 else 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                if (foundServiceUrl != null) "已连接" else "未连接",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (foundServiceUrl != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = foundServiceUrl ?: "未配置服务端地址",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = if (isLargeFont) 3 else 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        item {
+            Text(
+                "连接方式",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 24.dp, top = 24.dp, bottom = 8.dp)
+            )
+        }
+
+        item {
+            FilledTonalButton(
+                onClick = onOpenScanner,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("扫码连接", maxLines = if (isLargeFont) 2 else 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        item {
+            FilledTonalButton(
+                onClick = {
+                    if (isScanning) {
+                        scanJob?.cancel()
+                        isScanning = false
+                        scanLogs = scanLogs + ScanLog("Scan stopped by user.", LogType.INFO)
+                    } else {
+                        isScanning = true
+                        foundServiceUrl = null
+                        scanLogs = listOf(ScanLog("Starting manual scan...", LogType.INFO))
+                        scanJob = scope.launch {
+                            try {
+                                NetworkScanner.scanLocalNetwork(context).collect { log ->
+                                    scanLogs = scanLogs + log
+                                    if (log.type == LogType.SUCCESS) {
+                                        val url = log.message.substringBefore(" OK")
+                                        foundServiceUrl = url
+                                        sharedPreferences.edit().putString("service_url", url).apply()
+                                    }
+                                }
+                            } finally {
+                                isScanning = false
+                            }
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = if (isScanning) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = if (isScanning) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            ) {
+                if (isScanning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        strokeWidth = 2.dp
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "数据同步",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
-                    )
-                }
-                
-                Spacer(modifier = Modifier.height(12.dp))
-                
-                Text(
-                    text = "手动将今日应用使用数据上传至服务器。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                Button(
-                    onClick = {
-                        if (foundServiceUrl == null) {
-                            scanLogs = scanLogs + ScanLog("Error: No service URL found. Please connect first.", LogType.FAILURE)
-                            return@Button
-                        }
-                        
-                        if (!checkUsageStatsPermission(context)) {
-                            scanLogs = scanLogs + ScanLog("Error: Usage stats permission not granted.", LogType.FAILURE)
-                            return@Button
-                        }
-
-                        scope.launch {
-                            val usageStats = getDailyUsageStats(context)
-                            val totalMinutes = usageStats.totalUsageTime / (1000.0 * 60.0)
-                            val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
-                            
-                            val baseUrl = if (foundServiceUrl!!.startsWith("http")) foundServiceUrl!! else "http://$foundServiceUrl"
-                            
-                            NetworkScanner.syncUsageTime(baseUrl, totalMinutes, dateStr).collect { log ->
-                                scanLogs = scanLogs + log
-                            }
-                            NetworkScanner.syncAppUsage(baseUrl, dateStr, usageStats.topApps).collect { log ->
-                                scanLogs = scanLogs + log
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = foundServiceUrl != null
-                ) {
-                    Text("立即同步")
+                    Text("停止扫描", maxLines = if (isLargeFont) 2 else 1, overflow = TextOverflow.Ellipsis)
+                } else {
+                    Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("局域网搜索", maxLines = if (isLargeFont) 2 else 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
         
-        // 3. Logs Area (Bottom)
-        Text(
-            "操作日志",
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.align(Alignment.Start).padding(bottom = 8.dp)
-        )
+        item {
+            Text(
+                "操作日志",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 24.dp, top = 24.dp, bottom = 8.dp)
+            )
+        }
         
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            colors = CardDefaults.cardColors(
-                containerColor = Color(0xFF1E1E1E) // Dark terminal-like background
-            ),
-            shape = MaterialTheme.shapes.small
-        ) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(8.dp)
-            ) {
-                items(scanLogs) { log ->
-                    val color = when (log.type) {
-                        LogType.SUCCESS -> Color(0xFF4CAF50) // Green
-                        LogType.FAILURE -> Color(0xFFEF5350) // Red
-                        LogType.INFO -> Color(0xFFE0E0E0)    // Light Gray
+        if (visibleLogs.isEmpty()) {
+            item {
+                Text(
+                    "暂无日志记录",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 24.dp, bottom = 24.dp)
+                )
+            }
+        } else {
+            items(visibleLogs) { log ->
+                val color = when (log.type) {
+                    LogType.SUCCESS -> Color(0xFF4CAF50)
+                    LogType.FAILURE -> Color(0xFFEF5350)
+                    LogType.INFO -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                    ) {
+                        Text(
+                            text = ">",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.width(16.dp)
+                        )
+                        Text(
+                            text = log.message,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            ),
+                            color = color
+                        )
                     }
-                    
-                    Text(
-                        text = "> ${log.message}",
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                        ),
-                        color = color,
-                        modifier = Modifier.padding(vertical = 2.dp)
-                    )
                 }
             }
         }
