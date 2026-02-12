@@ -324,12 +324,20 @@ object NetworkScanner {
 
         val appsArray = org.json.JSONArray()
         apps.forEach { app ->
-            val appObj = JSONObject().apply {
-                put("app_key", app.packageName)
-                put("name", app.appName)
-                put("minutes", app.usageTime / (1000.0 * 60.0))
+            val minutes = app.usageTime / (1000.0 * 60.0)
+            if (minutes > 0 && app.packageName.isNotEmpty()) {
+                val appObj = JSONObject().apply {
+                    put("app_key", app.packageName)
+                    put("name", app.appName)
+                    put("minutes", minutes)
+                }
+                appsArray.put(appObj)
             }
-            appsArray.put(appObj)
+        }
+
+        if (appsArray.length() == 0) {
+            emit(ScanLog("No valid app usage data to sync.", LogType.INFO))
+            return@flow
         }
 
         val json = JSONObject().apply {
