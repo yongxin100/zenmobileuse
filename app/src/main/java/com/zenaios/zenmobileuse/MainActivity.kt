@@ -460,7 +460,122 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
             modifier = Modifier.padding(bottom = 24.dp)
         )
         
-        // Sync Action Card
+        // 1. Service Connection Status (Top Priority)
+        OutlinedCard(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            colors = CardDefaults.outlinedCardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp)
+            ) {
+                // Header
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = if (foundServiceUrl != null) Icons.Default.CheckCircle else Icons.Default.Error,
+                        contentDescription = null,
+                        tint = if (foundServiceUrl != null) Color(0xFF4CAF50) else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "服务端连接",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                // Status Text
+                if (foundServiceUrl != null) {
+                    Text(
+                        text = "已连接: $foundServiceUrl",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                } else {
+                    Text(
+                        text = "未连接服务端，请先配置连接",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // Actions
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // QR Scan (Primary)
+                    Button(
+                        onClick = onOpenScanner,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("扫码连接")
+                    }
+                    
+                    // LAN Scan (Secondary)
+                    OutlinedButton(
+                        onClick = {
+                            if (isScanning) {
+                                scanJob?.cancel()
+                                isScanning = false
+                                scanLogs = scanLogs + ScanLog("Scan stopped by user.", LogType.INFO)
+                            } else {
+                                isScanning = true
+                                foundServiceUrl = null
+                                scanLogs = listOf(ScanLog("Starting manual scan...", LogType.INFO))
+                                scanJob = scope.launch {
+                                    try {
+                                        NetworkScanner.scanLocalNetwork(context).collect { log ->
+                                            scanLogs = scanLogs + log
+                                            if (log.type == LogType.SUCCESS) {
+                                                val url = log.message.substringBefore(" OK")
+                                                foundServiceUrl = url
+                                                sharedPreferences.edit().putString("service_url", url).apply()
+                                            }
+                                        }
+                                    } finally {
+                                        isScanning = false
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                             contentColor = if (isScanning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        if (isScanning) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                color = MaterialTheme.colorScheme.error,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("停止")
+                        } else {
+                            Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("局域网扫描")
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Data Sync (Dependent on Connection)
         OutlinedCard(
             modifier = Modifier
                 .fillMaxWidth()
@@ -476,7 +591,7 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Sync,
+                        imageVector = Icons.Default.CloudUpload,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary
                     )
@@ -490,10 +605,18 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
                 
                 Spacer(modifier = Modifier.height(12.dp))
                 
+                Text(
+                    text = "手动将今日应用使用数据上传至服务器。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+                
                 Button(
                     onClick = {
                         if (foundServiceUrl == null) {
-                            scanLogs = scanLogs + ScanLog("Error: No service URL found. Please scan first.", LogType.FAILURE)
+                            scanLogs = scanLogs + ScanLog("Error: No service URL found. Please connect first.", LogType.FAILURE)
                             return@Button
                         }
                         
@@ -512,7 +635,7 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
                             NetworkScanner.syncUsageTime(baseUrl, totalMinutes, dateStr).collect { log ->
                                 scanLogs = scanLogs + log
                             }
-                            NetworkScanner.syncAppUsage(baseUrl, dateStr, usageStats.topApps).collect { log ->
+                            NetworkScanner.syncAppUsage(baseUrl, dateStr, usageStats.sortedList).collect { log ->
                                 scanLogs = scanLogs + log
                             }
                         }
@@ -520,121 +643,12 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
                     modifier = Modifier.fillMaxWidth(),
                     enabled = foundServiceUrl != null
                 ) {
-                    Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("同步今日使用时间")
-                }
-            }
-        }
-
-        // Service Status Card
-        OutlinedCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp),
-            colors = CardDefaults.outlinedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            )
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(
-                        imageVector = if (foundServiceUrl != null) Icons.Default.CheckCircle else Icons.Default.Error,
-                        contentDescription = null,
-                        tint = if (foundServiceUrl != null) Color.Green else MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "服务连接状态",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
-                    )
-                }
-                
-                Spacer(modifier = Modifier.height(12.dp))
-                
-                if (foundServiceUrl != null) {
-                    Text(
-                        text = "已连接到: $foundServiceUrl",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                } else {
-                    Text(
-                        text = "未连接服务",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                Button(
-                    onClick = {
-                        if (isScanning) {
-                            scanJob?.cancel()
-                            isScanning = false
-                            scanLogs = scanLogs + ScanLog("Scan stopped by user.", LogType.INFO)
-                        } else {
-                            isScanning = true
-                            foundServiceUrl = null
-                            scanLogs = listOf(ScanLog("Starting manual scan...", LogType.INFO))
-                            scanJob = scope.launch {
-                                try {
-                                    NetworkScanner.scanLocalNetwork(context).collect { log ->
-                                        scanLogs = scanLogs + log
-                                        if (log.type == LogType.SUCCESS) {
-                                            val url = log.message.substringBefore(" OK")
-                                            foundServiceUrl = url
-                                            sharedPreferences.edit().putString("service_url", url).apply()
-                                        }
-                                    }
-                                } finally {
-                                    isScanning = false
-                                }
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isScanning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    if (isScanning) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            color = Color.White,
-                            strokeWidth = 2.dp
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("停止探测")
-                    } else {
-                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("扫描局域网服务")
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(8.dp))
-
-                OutlinedButton(
-                    onClick = onOpenScanner,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("扫码连接")
+                    Text("立即同步")
                 }
             }
         }
         
-        // Logs Area
+        // 3. Logs Area (Bottom)
         Text(
             "操作日志",
             style = MaterialTheme.typography.labelLarge,
