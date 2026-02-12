@@ -61,4 +61,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("androidx.navigation:navigation-compose:2.7.7")
     implementation("androidx.compose.material:material-icons-extended:1.6.0")
+    implementation("androidx.camera:camera-camera2:1.3.1")
+    implementation("androidx.camera:camera-lifecycle:1.3.1")
+    implementation("androidx.camera:camera-view:1.3.1")
+    implementation("com.google.mlkit:barcode-scanning:17.2.0")
+    implementation("com.google.guava:guava:31.1-android")
 }

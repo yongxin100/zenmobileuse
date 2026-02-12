@@ -81,6 +81,22 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.background
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.core.content.ContextCompat
+import androidx.compose.ui.viewinterop.AndroidView
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
+import java.util.concurrent.Executors
+import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material3.ExperimentalMaterial3Api
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -135,12 +151,39 @@ fun MainScreen() {
                 })
             }
             composable("设置") {
-                SettingsScreen()
+                SettingsScreen(onOpenScanner = {
+                    navController.navigate("scan_qr")
+                })
             }
             composable("history") {
                 HistoryScreen(onBack = {
                     navController.popBackStack()
                 })
+            }
+            composable("scan_qr") {
+                val context = LocalContext.current
+                QRCodeScannerScreen(
+                    onResult = { result ->
+                        // Parse result (assume ip:port or url)
+                        // Example: "http://192.168.1.100:35126" or "192.168.1.100:35126"
+                        var url = result
+                        if (!url.startsWith("http")) {
+                            url = "http://$url"
+                        }
+                        // Validate basic URL structure?
+                        // Save to prefs
+                        val sharedPreferences = context.getSharedPreferences("zen_prefs", Context.MODE_PRIVATE)
+                        sharedPreferences.edit().putString("service_url", url).apply()
+                        
+                        // Show toast
+                        android.widget.Toast.makeText(context, "已连接: $url", android.widget.Toast.LENGTH_SHORT).show()
+                        
+                        navController.popBackStack()
+                    },
+                    onBack = {
+                        navController.popBackStack()
+                    }
+                )
             }
         }
     }
@@ -364,7 +407,7 @@ object NetworkScanner {
 }
 
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
     val context = LocalContext.current
     val sharedPreferences = remember { context.getSharedPreferences("zen_prefs", Context.MODE_PRIVATE) }
     val scope = rememberCoroutineScope()
@@ -372,6 +415,19 @@ fun SettingsScreen() {
     var scanLogs by remember { mutableStateOf(listOf<ScanLog>()) }
     var foundServiceUrl by remember { mutableStateOf(sharedPreferences.getString("service_url", null)) }
     var scanJob by remember { mutableStateOf<Job?>(null) }
+    
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                foundServiceUrl = sharedPreferences.getString("service_url", null)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
     
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
@@ -553,6 +609,17 @@ fun SettingsScreen() {
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("扫描局域网服务")
                     }
+                }
+                
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = onOpenScanner,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("扫码连接")
                 }
             }
         }
@@ -1347,3 +1414,152 @@ suspend fun getHistoryData(context: Context, page: Int, pageSize: Int = 10): Lis
     }
     list
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun QRCodeScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    
+    var isScanned by remember { mutableStateOf(false) }
+
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { granted ->
+            hasCameraPermission = granted
+        }
+    )
+
+    LaunchedEffect(Unit) {
+        if (!hasCameraPermission) {
+            launcher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("扫描二维码") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { paddingValues ->
+        if (hasCameraPermission) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+            ) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        val previewView = PreviewView(ctx)
+                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+
+                        cameraProviderFuture.addListener({
+                            val cameraProvider = cameraProviderFuture.get()
+                            
+                            val preview = Preview.Builder().build()
+                            preview.setSurfaceProvider(previewView.surfaceProvider)
+
+                            val imageAnalysis = ImageAnalysis.Builder()
+                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                .build()
+
+                            imageAnalysis.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
+                                processImageProxy(imageProxy) { result ->
+                                    if (!isScanned) {
+                                        isScanned = true
+                                        onResult(result)
+                                    }
+                                }
+                            }
+
+                            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+                            try {
+                                cameraProvider.unbindAll()
+                                cameraProvider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    cameraSelector,
+                                    preview,
+                                    imageAnalysis
+                                )
+                            } catch (exc: Exception) {
+                                // Handle exceptions
+                            }
+                        }, ContextCompat.getMainExecutor(ctx))
+                        previewView
+                    }
+                )
+                
+                // Overlay
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                     androidx.compose.foundation.Canvas(modifier = Modifier.size(250.dp)) {
+                         drawRect(
+                             color = Color.White,
+                             style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4.dp.toPx())
+                         )
+                     }
+                     Text(
+                         "将二维码对准框内", 
+                         color = Color.White, 
+                         modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp)
+                     )
+                }
+            }
+        } else {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("需要相机权限来扫描二维码")
+            }
+        }
+    }
+}
+
+@androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
+fun processImageProxy(imageProxy: ImageProxy, onResult: (String) -> Unit) {
+    val mediaImage = imageProxy.image
+    if (mediaImage != null) {
+        val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+        val scanner = BarcodeScanning.getClient()
+        
+        scanner.process(image)
+            .addOnSuccessListener { barcodes ->
+                for (barcode in barcodes) {
+                    barcode.rawValue?.let { value ->
+                        onResult(value)
+                        // Close image proxy is handled in onCompleteListener
+                        return@addOnSuccessListener 
+                    }
+                }
+            }
+            .addOnFailureListener {
+                // Task failed with an exception
+            }
+            .addOnCompleteListener {
+                imageProxy.close()
+            }
+    } else {
+        imageProxy.close()
+    }
+}
+EOF~
