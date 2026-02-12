@@ -316,6 +316,43 @@ object NetworkScanner {
             }
         }
     }.flowOn(Dispatchers.IO)
+
+    fun syncAppUsage(baseUrl: String, dateStr: String, apps: List<AppUsageInfo>): Flow<ScanLog> = flow {
+        emit(ScanLog("Syncing app usage details...", LogType.INFO))
+        val url = "$baseUrl/api/water_drop/phone_time/app_usage"
+        val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+
+        val appsArray = org.json.JSONArray()
+        apps.forEach { app ->
+            val appObj = JSONObject().apply {
+                put("app_key", app.packageName)
+                put("name", app.appName)
+                put("minutes", app.usageTime / (1000.0 * 60.0))
+            }
+            appsArray.put(appObj)
+        }
+
+        val json = JSONObject().apply {
+            put("source", "phone_sync")
+            put("ymd", dateStr)
+            put("apps", appsArray)
+        }
+
+        val body = json.toString().toRequestBody(jsonMediaType)
+        val request = Request.Builder().url(url).post(body).build()
+
+        try {
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                 emit(ScanLog("App usage sync successful!", LogType.SUCCESS))
+            } else {
+                 emit(ScanLog("App usage sync failed: ${response.code} ${response.message}", LogType.FAILURE))
+            }
+            response.close()
+        } catch (e: Exception) {
+            emit(ScanLog("App usage sync error: ${e.message}", LogType.FAILURE))
+        }
+    }.flowOn(Dispatchers.IO)
 }
 
 @Composable
@@ -399,6 +436,9 @@ fun SettingsScreen() {
                             val baseUrl = if (foundServiceUrl!!.startsWith("http")) foundServiceUrl!! else "http://$foundServiceUrl"
                             
                             NetworkScanner.syncUsageTime(baseUrl, totalMinutes, dateStr).collect { log ->
+                                scanLogs = scanLogs + log
+                            }
+                            NetworkScanner.syncAppUsage(baseUrl, dateStr, usageStats.sortedList).collect { log ->
                                 scanLogs = scanLogs + log
                             }
                         }
@@ -886,6 +926,34 @@ fun calculateUsageTimeWithEvents(context: Context, startTime: Long, endTime: Lon
     return usageMap
 }
 
+fun getAppUsageListFromMap(context: Context, usageMap: Map<String, Long>): List<AppUsageInfo> {
+    val packageManager = context.packageManager
+    val appUsageList = mutableListOf<AppUsageInfo>()
+
+    val isUserApp: (android.content.pm.ApplicationInfo) -> Boolean = { appInfo ->
+        (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 ||
+            (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+    }
+
+    val excludedPackages = setOf(context.packageName, "com.android.settings")
+
+    usageMap.forEach { (packageName, time) ->
+        if (time > 0 && packageName !in excludedPackages) {
+            try {
+                val appInfo = packageManager.getApplicationInfo(packageName, 0)
+                if (isUserApp(appInfo)) {
+                    val appName = packageManager.getApplicationLabel(appInfo).toString()
+                    val icon = packageManager.getApplicationIcon(appInfo)
+                    appUsageList.add(AppUsageInfo(packageName, appName, time, icon))
+                }
+            } catch (e: PackageManager.NameNotFoundException) {
+                appUsageList.add(AppUsageInfo(packageName, packageName, time, null))
+            }
+        }
+    }
+    return appUsageList.sortedByDescending { it.usageTime }
+}
+
 fun getDailyUsageStats(context: Context): UsageStatsData {
     val calendar = Calendar.getInstance()
     calendar.set(Calendar.HOUR_OF_DAY, 0)
@@ -897,38 +965,19 @@ fun getDailyUsageStats(context: Context): UsageStatsData {
 
     // Use queryEvents for more accurate calculation
     val usageMap = calculateUsageTimeWithEvents(context, startTime, endTime)
+    val totalTime = usageMap.values.sum()
 
+    val appUsageList = getAppUsageListFromMap(context, usageMap)
+    val targetCount = 20
+    val sortedList = appUsageList.take(targetCount).toMutableList()
+    
     val packageManager = context.packageManager
-    val appUsageList = mutableListOf<AppUsageInfo>()
-
     val isUserApp: (android.content.pm.ApplicationInfo) -> Boolean = { appInfo ->
         (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 ||
             (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
     }
-
-    // Exclude self and system settings
     val excludedPackages = setOf(context.packageName, "com.android.settings")
 
-    usageMap.forEach { (packageName, time) ->
-        if (time >= 0 && packageName !in excludedPackages) {
-            try {
-                val appInfo = packageManager.getApplicationInfo(packageName, 0)
-                if (isUserApp(appInfo)) {
-                    val appName = packageManager.getApplicationLabel(appInfo).toString()
-                    val icon = packageManager.getApplicationIcon(appInfo)
-                    appUsageList.add(AppUsageInfo(packageName, appName, time, icon))
-                }
-            } catch (e: PackageManager.NameNotFoundException) {
-                // Fallback for apps that are installed but not fully resolved (should happen less with QUERY_ALL_PACKAGES)
-                // Or uninstalled apps that still have usage stats
-                // We show them to ensure data completeness
-                appUsageList.add(AppUsageInfo(packageName, packageName, time, null))
-            }
-        }
-    }
-
-    val targetCount = 20
-    val sortedList = appUsageList.sortedByDescending { it.usageTime }.take(targetCount).toMutableList()
     if (sortedList.size < targetCount) {
         val existingPackages = sortedList.map { it.packageName }.toHashSet()
         val installedApps = packageManager.getInstalledApplications(0)
@@ -949,19 +998,11 @@ fun getDailyUsageStats(context: Context): UsageStatsData {
             }
         }
         addApps(nonSystemApps)
-        if (sortedList.size < targetCount) {
-            val systemApps = installedApps.filter {
-                it.packageName !in excludedPackages &&
-                    it.packageName !in existingPackages &&
-                    !isUserApp(it)
-            }
-            addApps(systemApps)
-        }
     }
-    val totalTime = usageMap.values.sum()
 
     return UsageStatsData(sortedList, totalTime)
 }
+
 
 @Composable
 fun PermissionRequestScreen(
@@ -1176,15 +1217,43 @@ fun HistoryItem(dateStr: String, time: Long) {
                             val totalMinutes = time / (1000.0 * 60.0)
                             val baseUrl = if (serviceUrl.startsWith("http")) serviceUrl else "http://$serviceUrl"
                             
+                            var isTotalSuccess = false
                             NetworkScanner.syncUsageTime(baseUrl, totalMinutes, dateStr).collect { log ->
                                 if (log.type == LogType.SUCCESS) {
-                                    withContext(Dispatchers.Main) {
-                                        android.widget.Toast.makeText(context, "同步成功", android.widget.Toast.LENGTH_SHORT).show()
-                                    }
-                                    showSyncButton = false // Hide button on success
+                                    isTotalSuccess = true
                                 } else if (log.type == LogType.FAILURE) {
                                     withContext(Dispatchers.Main) {
-                                        android.widget.Toast.makeText(context, "同步失败: ${log.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                        android.widget.Toast.makeText(context, "总时间同步失败: ${log.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+
+                            val calendar = Calendar.getInstance()
+                            val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(dateStr)
+                            if (date != null) {
+                                calendar.time = date
+                                calendar.set(Calendar.HOUR_OF_DAY, 0)
+                                calendar.set(Calendar.MINUTE, 0)
+                                calendar.set(Calendar.SECOND, 0)
+                                calendar.set(Calendar.MILLISECOND, 0)
+                                val startTime = calendar.timeInMillis
+                                val endOfDay = startTime + 24 * 60 * 60 * 1000 - 1
+                                val currentTime = System.currentTimeMillis()
+                                val endTime = if (endOfDay > currentTime) currentTime else endOfDay
+                                
+                                val usageMap = calculateUsageTimeWithEvents(context, startTime, endTime)
+                                val appList = getAppUsageListFromMap(context, usageMap)
+                                
+                                NetworkScanner.syncAppUsage(baseUrl, dateStr, appList).collect { log ->
+                                    if (log.type == LogType.SUCCESS) {
+                                        withContext(Dispatchers.Main) {
+                                            android.widget.Toast.makeText(context, "同步成功", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                        showSyncButton = false 
+                                    } else if (log.type == LogType.FAILURE) {
+                                        withContext(Dispatchers.Main) {
+                                            android.widget.Toast.makeText(context, "应用详情同步失败: ${log.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
                             }
