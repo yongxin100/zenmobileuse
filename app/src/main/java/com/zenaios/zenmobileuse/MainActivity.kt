@@ -164,13 +164,23 @@ fun MainScreen() {
                 val context = LocalContext.current
                 QRCodeScannerScreen(
                     onResult = { result ->
-                        // Parse result (assume ip:port or url)
-                        // Example: "http://192.168.1.100:35126" or "192.168.1.100:35126"
+                        // Parse result
                         var url = result
-                        if (!url.startsWith("http")) {
-                            url = "http://$url"
+                        try {
+                            // Try parsing as JSON first
+                            val json = JSONObject(result)
+                            if (json.has("ip") && json.has("port")) {
+                                val ip = json.getString("ip")
+                                val port = json.getInt("port")
+                                url = "http://$ip:$port"
+                            }
+                        } catch (e: Exception) {
+                            // Not JSON, assume simple string format
+                            if (!url.startsWith("http")) {
+                                url = "http://$url"
+                            }
                         }
-                        // Validate basic URL structure?
+
                         // Save to prefs
                         val sharedPreferences = context.getSharedPreferences("zen_prefs", Context.MODE_PRIVATE)
                         sharedPreferences.edit().putString("service_url", url).apply()
