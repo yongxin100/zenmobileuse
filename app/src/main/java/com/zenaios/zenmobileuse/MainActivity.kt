@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
@@ -114,6 +115,15 @@ import androidx.compose.foundation.text.KeyboardOptions
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1002)
+            }
+        }
         runCatching {
             ContextCompat.startForegroundService(
                 this,
@@ -133,8 +143,8 @@ class MainActivity : ComponentActivity() {
 fun MainScreen() {
     val navController = rememberNavController()
     var selectedItem by remember { mutableIntStateOf(0) }
-    val items = listOf("时间", "设置")
-    val icons = listOf(Icons.Filled.Schedule, Icons.Filled.Settings)
+    val items = listOf("掌控力", "时间", "设置")
+    val icons = listOf(Icons.Filled.Security, Icons.Filled.Schedule, Icons.Filled.Settings)
 
     Scaffold(
         bottomBar = {
@@ -161,9 +171,12 @@ fun MainScreen() {
     ) { innerPadding ->
         NavHost(
             navController = navController,
-            startDestination = "时间",
+            startDestination = "掌控力",
             modifier = Modifier.padding(innerPadding)
         ) {
+            composable("掌控力") {
+                ControlPowerScreen()
+            }
             composable("时间") {
                 AppUsageScreen(onOpenHistory = {
                     navController.navigate("history")
@@ -389,6 +402,66 @@ object NetworkScanner {
         }
     }.flowOn(Dispatchers.IO)
 
+    private fun readResponseText(response: okhttp3.Response): String {
+        return response.body?.string().orEmpty()
+    }
+
+    fun fetchAppWhitelist(context: Context, baseUrl: String, limit: Int = 2000): Flow<ScanLog> = flow {
+        val url = "$baseUrl/api/water_drop/phone_time/app_whitelist?limit=$limit"
+        emit(ScanLog("Fetching server whitelist...", LogType.INFO))
+        try {
+            val request = Request.Builder().url(url).get().build()
+            val response = client.newCall(request).execute()
+            val body = readResponseText(response)
+            if (!response.isSuccessful) {
+                response.close()
+                emit(ScanLog("Whitelist fetch failed: ${response.code} ${response.message}", LogType.FAILURE))
+                return@flow
+            }
+            response.close()
+            val arr = runCatching { org.json.JSONArray(body) }.getOrNull()
+            val count = arr?.length() ?: 0
+            context.getSharedPreferences("zen_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putString("server_app_whitelist_json", body)
+                .apply()
+            emit(ScanLog("Whitelist fetched: $count items", LogType.SUCCESS))
+        } catch (e: Exception) {
+            emit(ScanLog("Whitelist fetch error: ${e.message}", LogType.FAILURE))
+        }
+    }.flowOn(Dispatchers.IO)
+
+    fun fetchPhoneTimeStateAndApply(context: Context, baseUrl: String): Flow<ScanLog> = flow {
+        val url = "$baseUrl/api/water_drop/phone_time/state?limit=50"
+        emit(ScanLog("Fetching server phone_time/state...", LogType.INFO))
+        try {
+            val request = Request.Builder().url(url).get().build()
+            val response = client.newCall(request).execute()
+            val body = readResponseText(response)
+            if (!response.isSuccessful) {
+                response.close()
+                emit(ScanLog("State fetch failed: ${response.code} ${response.message}", LogType.FAILURE))
+                return@flow
+            }
+            response.close()
+            val json = JSONObject(body)
+            val available = json.optDouble("available_minutes", Double.NaN)
+            if (available.isNaN()) {
+                emit(ScanLog("State parse failed: missing available_minutes", LogType.FAILURE))
+                return@flow
+            }
+            val availableInt = kotlin.math.floor(available).toInt()
+            context.getSharedPreferences("zen_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putString("server_phone_time_state_json", body)
+                .apply()
+            UsageLimitManager.updateServerAvailableMinutes(context, availableInt)
+            emit(ScanLog("Server available minutes: $availableInt", LogType.SUCCESS))
+        } catch (e: Exception) {
+            emit(ScanLog("State fetch error: ${e.message}", LogType.FAILURE))
+        }
+    }.flowOn(Dispatchers.IO)
+
     fun syncAppUsage(baseUrl: String, dateStr: String, apps: List<AppUsageInfo>): Flow<ScanLog> = flow {
         emit(ScanLog("Syncing app usage details...", LogType.INFO))
         val url = "$baseUrl/api/water_drop/phone_time/app_usage"
@@ -432,6 +505,15 @@ object NetworkScanner {
         } catch (e: Exception) {
             emit(ScanLog("App usage sync error: ${e.message}", LogType.FAILURE))
         }
+    }.flowOn(Dispatchers.IO)
+
+    fun syncAppUsageThenRefresh(context: Context, baseUrl: String, dateStr: String, apps: List<AppUsageInfo>): Flow<ScanLog> = flow {
+        // 1) upload usage
+        syncAppUsage(baseUrl, dateStr, apps).collect { emit(it) }
+        // 2) fetch whitelist
+        fetchAppWhitelist(context, baseUrl).collect { emit(it) }
+        // 3) fetch state (already includes uploaded usage)
+        fetchPhoneTimeStateAndApply(context, baseUrl).collect { emit(it) }
     }.flowOn(Dispatchers.IO)
 }
 
@@ -647,6 +729,8 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
     var limitPasswordError by remember { mutableStateOf("") }
     var dailyLimitInput by remember { mutableStateOf("") }
     var dailyLimitError by remember { mutableStateOf("") }
+    var showReminderDialog by remember { mutableStateOf(false) }
+    var selectedReminderMinutes by remember { mutableIntStateOf(UsageLimitManager.getUsageReminderIntervalMinutes(context)) }
     val fontScale = LocalConfiguration.current.fontScale
     val isLargeFont = fontScale >= 1.15f
     val visibleLogs = if (scanLogs.size > 5) scanLogs.takeLast(5) else scanLogs
@@ -843,15 +927,11 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
 
                             scope.launch {
                                 val usageStats = getDailyUsageStats(context)
-                                val totalMinutes = usageStats.totalUsageTime / (1000.0 * 60.0)
                                 val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
 
                                 val baseUrl = if (foundServiceUrl!!.startsWith("http")) foundServiceUrl!! else "http://$foundServiceUrl"
 
-                                NetworkScanner.syncUsageTime(baseUrl, totalMinutes, dateStr).collect { log ->
-                                    scanLogs = scanLogs + log
-                                }
-                                NetworkScanner.syncAppUsage(baseUrl, dateStr, usageStats.topApps).collect { log ->
+                                NetworkScanner.syncAppUsageThenRefresh(context, baseUrl, dateStr, usageStats.topApps).collect { log ->
                                     scanLogs = scanLogs + log
                                 }
                             }
@@ -1159,6 +1239,24 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
         }
 
         item {
+            FilledTonalButton(
+                onClick = {
+                    selectedReminderMinutes = UsageLimitManager.getUsageReminderIntervalMinutes(context)
+                    showReminderDialog = true
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Icon(Icons.Default.DateRange, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("手机使用时间定时提醒", maxLines = if (isLargeFont) 2 else 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+
+        item {
             Text(
                 "管理员密码",
                 style = MaterialTheme.typography.labelLarge,
@@ -1447,6 +1545,62 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
         )
     }
 
+    if (showReminderDialog) {
+        AlertDialog(
+            onDismissRequest = { showReminderDialog = false },
+            title = { Text("手机使用时间定时提醒") },
+            text = {
+                Column {
+                    listOf(5, 30, 60, 120, 0).forEach { minutes ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = selectedReminderMinutes == minutes,
+                                onClick = { selectedReminderMinutes = minutes }
+                            )
+                            Text(
+                                text = when (minutes) {
+                                    5 -> "每5分钟提醒"
+                                    30 -> "每30分钟提醒"
+                                    60 -> "每1小时提醒"
+                                    120 -> "每2小时提醒"
+                                    else -> "不提醒"
+                                }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        UsageLimitManager.updateUsageReminderIntervalMinutes(context, selectedReminderMinutes)
+                        showReminderDialog = false
+                        scanLogs = scanLogs + ScanLog(
+                            when (selectedReminderMinutes) {
+                                5 -> "已设置每5分钟提醒"
+                                30 -> "已设置每30分钟提醒"
+                                60 -> "已设置每1小时提醒"
+                                120 -> "已设置每2小时提醒"
+                                else -> "已设置不提醒"
+                            },
+                            LogType.SUCCESS
+                        )
+                    }
+                ) {
+                    Text("保存")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showReminderDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
     if (showAdminPasswordDialog) {
         val adminPasswordFocusRequester = remember { FocusRequester() }
         LaunchedEffect(Unit) {
@@ -1533,7 +1687,8 @@ data class AppUsageInfo(
 
 data class UsageStatsData(
     val topApps: List<AppUsageInfo>,
-    val totalUsageTime: Long
+    val totalUsageTime: Long,
+    val rawTotalUsageTime: Long = 0L
 )
 
 enum class PasswordAction {
@@ -1549,19 +1704,6 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     var hasPermission by remember { mutableStateOf(checkUsageStatsPermission(context)) }
     var usageData by remember { mutableStateOf(UsageStatsData(emptyList(), 0L)) }
-    var remainingMillis by remember { mutableLongStateOf(UsageLimitManager.getRemainingMillis(context, usageData.totalUsageTime)) }
-    var showPasswordDialog by remember { mutableStateOf(false) }
-    var showDurationDialog by remember { mutableStateOf(false) }
-    var passwordInput by remember { mutableStateOf("") }
-    var passwordError by remember { mutableStateOf(false) }
-    var selectedExtraMinutes by remember { mutableIntStateOf(30) }
-    var passwordAction by remember { mutableStateOf(PasswordAction.TEMP_EXTEND) }
-    var unlockedToday by remember { mutableStateOf(UsageLimitManager.isUnlockedToday(context)) }
-
-    LaunchedEffect(Unit) {
-        UsageLimitManager.ensureToday(context)
-        unlockedToday = UsageLimitManager.isUnlockedToday(context)
-    }
 
     // Use DisposableEffect to observe lifecycle changes (resume) to auto-refresh data
     DisposableEffect(lifecycleOwner) {
@@ -1570,9 +1712,7 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
                 hasPermission = checkUsageStatsPermission(context)
                 if (hasPermission) {
                     usageData = getDailyUsageStats(context)
-                    remainingMillis = UsageLimitManager.getRemainingMillis(context, usageData.totalUsageTime)
                     UsageLimitManager.updateLockState(context, usageData.totalUsageTime)
-                    unlockedToday = UsageLimitManager.isUnlockedToday(context)
                 }
             }
         }
@@ -1586,82 +1726,234 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
     LaunchedEffect(hasPermission) {
         if (hasPermission) {
             usageData = getDailyUsageStats(context)
-            remainingMillis = UsageLimitManager.getRemainingMillis(context, usageData.totalUsageTime)
             UsageLimitManager.updateLockState(context, usageData.totalUsageTime)
-            unlockedToday = UsageLimitManager.isUnlockedToday(context)
             while (true) {
                 delay(60000) // 1 minute
                 usageData = getDailyUsageStats(context)
-                remainingMillis = UsageLimitManager.getRemainingMillis(context, usageData.totalUsageTime)
+                UsageLimitManager.updateLockState(context, usageData.totalUsageTime)
+            }
+        }
+    }
+
+    if (hasPermission) {
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            TotalUsageHeader(usageData.totalUsageTime, usageData.rawTotalUsageTime, onOpenHistory)
+            Spacer(modifier = Modifier.height(16.dp))
+            AppUsageList(usageData.topApps)
+        }
+    } else {
+        PermissionRequestScreen(
+            onGrantPermission = {
+                context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+            },
+            onRefresh = {
+                hasPermission = checkUsageStatsPermission(context)
+                if (hasPermission) {
+                    usageData = getDailyUsageStats(context)
+                }
+            },
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
+fun ControlPowerScreen(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    var hasPermission by remember { mutableStateOf(checkUsageStatsPermission(context)) }
+    var usageData by remember { mutableStateOf(UsageStatsData(emptyList(), 0L)) }
+    var unlockedToday by remember { mutableStateOf(UsageLimitManager.isUnlockedToday(context)) }
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var showDurationDialog by remember { mutableStateOf(false) }
+    var passwordInput by remember { mutableStateOf("") }
+    var passwordError by remember { mutableStateOf(false) }
+    var selectedExtraMinutes by remember { mutableIntStateOf(30) }
+    var passwordAction by remember { mutableStateOf(PasswordAction.TEMP_EXTEND) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                hasPermission = checkUsageStatsPermission(context)
+                if (hasPermission) {
+                    usageData = getDailyUsageStats(context)
+                    UsageLimitManager.updateLockState(context, usageData.totalUsageTime)
+                    unlockedToday = UsageLimitManager.isUnlockedToday(context)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    LaunchedEffect(hasPermission) {
+        if (hasPermission) {
+            usageData = getDailyUsageStats(context)
+            UsageLimitManager.updateLockState(context, usageData.totalUsageTime)
+            unlockedToday = UsageLimitManager.isUnlockedToday(context)
+            while (true) {
+                delay(5000)
+                usageData = getDailyUsageStats(context)
                 UsageLimitManager.updateLockState(context, usageData.totalUsageTime)
                 unlockedToday = UsageLimitManager.isUnlockedToday(context)
             }
         }
     }
 
-    if (hasPermission) {
-        val baseQuotaMinutes = UsageLimitManager.getDailyLimitMinutes(context) + UsageLimitManager.getTempExtraMinutes(context)
-        val baseQuotaMillis = baseQuotaMinutes * 60_000L
-        val exceededMillis = (usageData.totalUsageTime - baseQuotaMillis).coerceAtLeast(0L)
-        Column(
+    if (!hasPermission) {
+        PermissionRequestScreen(
+            onGrantPermission = { context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },
+            onRefresh = { hasPermission = checkUsageStatsPermission(context) },
             modifier = modifier
-                .fillMaxSize()
-                .padding(16.dp)
+        )
+        return
+    }
+
+    val limitDecision = UsageLimitManager.evaluateLimit(context, usageData.totalUsageTime)
+    val syncedBalanceMillis = limitDecision.syncedAvailableMinutes?.toLong()?.times(60_000L)
+    val dailyLimitMillis = limitDecision.effectiveDailyLimitMinutes.toLong() * 60_000L
+    val referenceCapMillis = if (syncedBalanceMillis != null) minOf(syncedBalanceMillis, dailyLimitMillis) else dailyLimitMillis
+    val controlRemainingMillis = referenceCapMillis - usageData.totalUsageTime
+    val isLimited = !unlockedToday && limitDecision.shouldLock
+    val exceededMillis = (usageData.totalUsageTime - dailyLimitMillis).coerceAtLeast(0L)
+    val temporaryReleaseActive = limitDecision.temporaryReleaseRemainingMillis > 0L
+    val releaseStatusText = when {
+        unlockedToday -> "当前状态：今天解除中"
+        limitDecision.temporaryReleaseRemainingMinutes > 0 ->
+            "当前状态：临时解除中（已临时解除 ${limitDecision.temporaryReleaseGrantedMinutes} 分钟，倒计时 ${formatCountdown(limitDecision.temporaryReleaseRemainingMillis)}）"
+        else -> null
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isLimited) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer
+            )
         ) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (remainingMillis >= 0) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.errorContainer
-                    }
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "掌控力",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
                 )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
+                Spacer(modifier = Modifier.height(8.dp))
+                if (releaseStatusText != null) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text(
+                            text = releaseStatusText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+                if (isLimited) {
                     Text(
-                        text = "今日手机剩余使用额度",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
+                        text = "已进入限制模式",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = if (unlockedToday) "今日已解除限制" else formatRemainingDisplay(remainingMillis),
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = if (unlockedToday || remainingMillis >= 0) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.onErrorContainer
-                        },
-                        fontWeight = FontWeight.Bold
+                        text = "Naruto可用余额：${syncedBalanceMillis?.let { formatRemainingDisplay(it) } ?: "暂未同步"}",
+                        style = MaterialTheme.typography.bodySmall
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    if (unlockedToday) {
+                    Text(
+                        text = "今天上限：${formatTime(dailyLimitMillis)}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "今天已使用：${formatTime(usageData.totalUsageTime)}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (exceededMillis > 0) {
                         Text(
-                            text = "今天已解除限制，你可以正常使用手机。",
+                            text = "今天已超出：${formatTime(exceededMillis)}",
                             style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Text(
+                        text = when {
+                            limitDecision.lockBySyncedBalance -> "Naruto可用余额不足，已触发限制。"
+                            limitDecision.lockByDailyLimit -> "今天已使用超过今天上限，已触发限制。"
+                            else -> "已触发限制。"
+                        },
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            passwordAction = PasswordAction.TEMP_EXTEND
+                            showPasswordDialog = true
+                            passwordInput = ""
+                            passwordError = false
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("临时解除")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            passwordAction = PasswordAction.UNLOCK_TODAY
+                            showPasswordDialog = true
+                            passwordInput = ""
+                            passwordError = false
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("今天解除")
+                    }
+                } else {
+                    if (!temporaryReleaseActive) {
+                        Text(
+                            text = "今日还可用的时间：${formatRemainingDisplay(controlRemainingMillis)}",
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "今天额度：${formatTime(baseQuotaMillis)}",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            text = "今天已使用：${formatTime(usageData.totalUsageTime)}",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            text = if (exceededMillis > 0) "今天已超出：${formatTime(exceededMillis)}" else "今天还未超出额度",
-                            style = MaterialTheme.typography.bodySmall
-                        )
+                    }
+                    Text(
+                        text = "Naruto可用余额：${syncedBalanceMillis?.let { formatRemainingDisplay(it) } ?: "暂未同步"}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "今天上限：${formatTime(dailyLimitMillis)}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "今天已使用：${formatTime(usageData.totalUsageTime)}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (unlockedToday) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Button(
                             onClick = {
                                 val refreshedUsage = getDailyUsageStats(context)
                                 usageData = refreshedUsage
                                 UsageLimitManager.relockToday(context, refreshedUsage.totalUsageTime)
-                                remainingMillis = UsageLimitManager.getRemainingMillis(context, refreshedUsage.totalUsageTime)
+                                UsageLimitManager.updateLockState(context, refreshedUsage.totalUsageTime)
                                 unlockedToday = UsageLimitManager.isUnlockedToday(context)
                             },
                             modifier = Modifier.fillMaxWidth()
@@ -1669,10 +1961,6 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
                             Text("重新限制")
                         }
                     } else {
-                        Text(
-                            text = "今天额度：${formatTime(baseQuotaMillis)}（含临时增加 ${UsageLimitManager.getTempExtraMinutes(context)} 分钟）",
-                            style = MaterialTheme.typography.bodySmall
-                        )
                         Spacer(modifier = Modifier.height(12.dp))
                         Button(
                             onClick = {
@@ -1700,23 +1988,7 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
                     }
                 }
             }
-            TotalUsageHeader(usageData.totalUsageTime, onOpenHistory)
-            Spacer(modifier = Modifier.height(16.dp))
-            AppUsageList(usageData.topApps)
         }
-    } else {
-        PermissionRequestScreen(
-            onGrantPermission = {
-                context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
-            },
-            onRefresh = {
-                hasPermission = checkUsageStatsPermission(context)
-                if (hasPermission) {
-                    usageData = getDailyUsageStats(context)
-                }
-            },
-            modifier = modifier
-        )
     }
 
     if (showPasswordDialog) {
@@ -1761,7 +2033,6 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
                                 UsageLimitManager.unlockToday(context)
                                 val refreshedUsage = getDailyUsageStats(context)
                                 usageData = refreshedUsage
-                                remainingMillis = UsageLimitManager.getRemainingMillis(context, refreshedUsage.totalUsageTime)
                                 UsageLimitManager.updateLockState(context, refreshedUsage.totalUsageTime)
                                 unlockedToday = UsageLimitManager.isUnlockedToday(context)
                             }
@@ -1787,7 +2058,7 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
             title = { Text("选择临时增加时长") },
             text = {
                 Column {
-                    listOf(30, 60, 120).forEach { minutes ->
+                    listOf(0, 30, 60, 120, 240, 300).forEach { minutes ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
@@ -1798,9 +2069,12 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
                             )
                             Text(
                                 text = when (minutes) {
+                                    0 -> "恢复限制"
                                     30 -> "30分钟"
                                     60 -> "1个小时"
-                                    else -> "2个小时"
+                                    120 -> "2个小时"
+                                    240 -> "4个小时"
+                                    else -> "5个小时"
                                 }
                             )
                         }
@@ -1810,10 +2084,13 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
             confirmButton = {
                 TextButton(
                     onClick = {
-                        UsageLimitManager.addTempExtraMinutes(context, selectedExtraMinutes)
+                        if (selectedExtraMinutes == 0) {
+                            UsageLimitManager.stopTemporaryRelease(context, usageData.totalUsageTime)
+                        } else {
+                            UsageLimitManager.startTemporaryRelease(context, selectedExtraMinutes, usageData.totalUsageTime)
+                        }
                         val refreshedUsage = getDailyUsageStats(context)
                         usageData = refreshedUsage
-                        remainingMillis = UsageLimitManager.getRemainingMillis(context, refreshedUsage.totalUsageTime)
                         UsageLimitManager.updateLockState(context, refreshedUsage.totalUsageTime)
                         unlockedToday = UsageLimitManager.isUnlockedToday(context)
                         showDurationDialog = false
@@ -1833,7 +2110,7 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
 
 
 @Composable
-fun TotalUsageHeader(totalTime: Long, onDoubleTap: () -> Unit = {}) {
+fun TotalUsageHeader(totalTime: Long, rawTotalTime: Long, onDoubleTap: () -> Unit = {}) {
     val animatedTotalTime by animateIntAsState(
         targetValue = totalTime.toInt(),
         animationSpec = tween(durationMillis = 1000, easing = FastOutSlowInEasing),
@@ -1861,7 +2138,7 @@ fun TotalUsageHeader(totalTime: Long, onDoubleTap: () -> Unit = {}) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = "掌控力",
+                text = "非白名单应用使用",
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
@@ -1876,6 +2153,12 @@ fun TotalUsageHeader(totalTime: Long, onDoubleTap: () -> Unit = {}) {
                 color = MaterialTheme.colorScheme.onSurface,
                 maxFontSize = MaterialTheme.typography.displayMedium.fontSize,
                 minFontSize = 18.sp
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "总使用时间：${formatMinutesOnly(rawTotalTime)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
@@ -2032,7 +2315,7 @@ fun formatTime(millis: Long): String {
     val hours = minutes / 60
     val remainingMinutes = minutes % 60
     return if (hours > 0) {
-        "${hours}小时${remainingMinutes}分钟"
+        if (remainingMinutes == 0L) "${hours}小时" else "${hours}小时${remainingMinutes}分钟"
     } else {
         "${remainingMinutes}分钟"
     }
@@ -2049,6 +2332,14 @@ fun formatRemainingDisplay(millis: Long): String {
     val minutes = absMinutes % 60
     val value = if (hours > 0) "${hours}小时${minutes}分钟" else "${minutes}分钟"
     return if (millis >= 0) value else "已超时$value"
+}
+
+fun formatCountdown(millis: Long): String {
+    val safe = millis.coerceAtLeast(0L) / 1000L
+    val hours = safe / 3600
+    val minutes = (safe % 3600) / 60
+    val seconds = safe % 60
+    return String.format("%02d:%02d:%02d", hours, minutes, seconds)
 }
 
 fun checkUsageStatsPermission(context: Context): Boolean {
@@ -2068,6 +2359,46 @@ fun isLockAccessibilityEnabled(context: Context): Boolean {
     ) ?: return false
     val expected = ComponentName(context, LockAccessibilityService::class.java).flattenToString()
     return enabledServices.split(':').any { it.equals(expected, ignoreCase = true) }
+}
+
+fun getServerAppWhitelistPackages(context: Context): Set<String> {
+    val sharedPreferences = context.getSharedPreferences("zen_prefs", Context.MODE_PRIVATE)
+    val raw = sharedPreferences.getString("server_app_whitelist_json", null).orEmpty()
+    if (raw.isBlank()) return emptySet()
+    val array = runCatching { org.json.JSONArray(raw) }.getOrNull() ?: return emptySet()
+    val values = mutableSetOf<String>()
+    for (index in 0 until array.length()) {
+        when (val item = array.opt(index)) {
+            is String -> {
+                val value = item.trim().lowercase(Locale.getDefault())
+                if (value.isNotEmpty()) values.add(value)
+            }
+            is JSONObject -> {
+                listOf("app_key", "package_name", "package", "app_id", "bundle_id", "name", "app_name", "title").forEach { key ->
+                    val value = item.optString(key).trim().lowercase(Locale.getDefault())
+                    if (value.isNotEmpty()) {
+                        values.add(value)
+                    }
+                }
+            }
+        }
+    }
+    return values
+}
+
+fun excludeWhitelistedUsage(context: Context, usageMap: Map<String, Long>): Map<String, Long> {
+    val whitelistKeys = getServerAppWhitelistPackages(context)
+    if (whitelistKeys.isEmpty()) return usageMap
+    val packageManager = context.packageManager
+    return usageMap.filterKeys { packageName ->
+        val packageMatched = packageName.lowercase(Locale.getDefault()) in whitelistKeys
+        val appName = runCatching {
+            val appInfo = packageManager.getApplicationInfo(packageName, 0)
+            packageManager.getApplicationLabel(appInfo).toString()
+        }.getOrNull().orEmpty().lowercase(Locale.getDefault())
+        val nameMatched = appName.isNotBlank() && appName in whitelistKeys
+        !packageMatched && !nameMatched
+    }
 }
 
 fun calculateUsageTimeWithEvents(context: Context, startTime: Long, endTime: Long): Map<String, Long> {
@@ -2146,7 +2477,9 @@ fun getDailyUsageStats(context: Context): UsageStatsData {
     val endTime = System.currentTimeMillis()
 
     // Use queryEvents for more accurate calculation
-    val usageMap = calculateUsageTimeWithEvents(context, startTime, endTime)
+    val rawUsageMap = calculateUsageTimeWithEvents(context, startTime, endTime)
+    val rawTotalTime = rawUsageMap.values.sum()
+    val usageMap = excludeWhitelistedUsage(context, rawUsageMap)
     val totalTime = usageMap.values.sum()
 
     val appUsageList = getAppUsageListFromMap(context, usageMap)
@@ -2182,7 +2515,7 @@ fun getDailyUsageStats(context: Context): UsageStatsData {
         addApps(nonSystemApps)
     }
 
-    return UsageStatsData(sortedList, totalTime)
+    return UsageStatsData(sortedList, totalTime, rawTotalTime)
 }
 
 

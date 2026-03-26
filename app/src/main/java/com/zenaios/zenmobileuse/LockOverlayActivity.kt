@@ -53,7 +53,7 @@ private fun LockOverlayScreen(onOpenZen: () -> Unit) {
     BackHandler(enabled = true) {}
     val context = androidx.compose.ui.platform.LocalContext.current
     var usedMillis by remember { mutableLongStateOf(getDailyUsageStats(context).totalUsageTime) }
-    val remaining = UsageLimitManager.getRemainingMillis(context, usedMillis)
+    val limitDecision = UsageLimitManager.evaluateLimit(context, usedMillis)
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -63,7 +63,17 @@ private fun LockOverlayScreen(onOpenZen: () -> Unit) {
     ) {
         Text("今日手机使用额度已超限", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(10.dp))
-        Text("超出时长：${formatExceeded(remaining)}", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = when {
+                limitDecision.lockBySyncedBalance -> {
+                    val syncedBalance = limitDecision.syncedAvailableMinutes?.toLong()?.times(60_000L) ?: 0L
+                    "同步余额不足：${formatExceeded(syncedBalance)}"
+                }
+                limitDecision.lockByDailyLimit -> "超出时长：${formatExceeded(limitDecision.dailyRemainingMillis)}"
+                else -> "已进入限制模式"
+            },
+            style = MaterialTheme.typography.titleMedium
+        )
         Spacer(modifier = Modifier.height(18.dp))
         Button(
             onClick = {
