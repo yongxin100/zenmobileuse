@@ -1,14 +1,20 @@
 package com.zenaios.zenmobileuse
 
 import android.app.AppOpsManager
+import android.app.DownloadManager
 import android.app.usage.UsageStatsManager
+import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.net.ConnectivityManager
 import android.net.LinkProperties
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Process
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -36,6 +42,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -66,6 +74,7 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.net.URI
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import androidx.compose.material.icons.filled.Apps
@@ -73,6 +82,8 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
@@ -98,10 +109,17 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.foundation.text.KeyboardOptions
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        runCatching {
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, UsageMonitorService::class.java)
+            )
+        }
         enableEdgeToEdge()
         setContent {
             ZenmobileuseTheme {
@@ -417,6 +435,191 @@ object NetworkScanner {
     }.flowOn(Dispatchers.IO)
 }
 
+data class UpdateInfo(
+    val versionName: String,
+    val versionCode: Long,
+    val notes: String,
+    val forceUpdate: Boolean,
+    val downloadUrl: String
+)
+
+data class UpdateCheckResult(
+    val hasUpdate: Boolean,
+    val updateInfo: UpdateInfo?,
+    val message: String
+)
+
+object MobileUpdateManager {
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .build()
+
+    private fun normalizeServiceUrl(raw: String): String {
+        val trimmed = raw.trim()
+        return if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) trimmed else "http://$trimmed"
+    }
+
+    private fun buildOrigin(serviceUrl: String): String? {
+        val uri = URI(serviceUrl)
+        val scheme = uri.scheme ?: return null
+        val host = uri.host ?: return null
+        val portPart = if (uri.port > 0) ":${uri.port}" else ""
+        return "$scheme://$host$portPart"
+    }
+
+    private fun resolveDownloadUrl(serviceUrl: String, rawUrl: String): String {
+        if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
+            return rawUrl
+        }
+        val origin = buildOrigin(serviceUrl) ?: serviceUrl.trimEnd('/')
+        return "$origin/${rawUrl.trimStart('/')}"
+    }
+
+    private fun getCurrentVersionInfo(context: Context): Pair<String, Long> {
+        val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+        val versionName = packageInfo.versionName ?: "0.0.0"
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toLong()
+        }
+        return versionName to versionCode
+    }
+
+    suspend fun checkForUpdate(context: Context, serviceUrlRaw: String): UpdateCheckResult = withContext(Dispatchers.IO) {
+        val serviceUrl = normalizeServiceUrl(serviceUrlRaw)
+        val checkUrl = "${serviceUrl.trimEnd('/')}/api/mobile/version/check"
+        val (currentVersionName, currentVersionCode) = getCurrentVersionInfo(context)
+        val requestJson = JSONObject().apply {
+            put("platform", "android")
+            put("app_id", "zenA+")
+            put("version_name", currentVersionName)
+            put("version_code", currentVersionCode)
+            put("os_name", "Android")
+            put("os_version", Build.VERSION.RELEASE ?: "")
+            put("device_id", Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "")
+            put("channel", "official")
+            put("arch", Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown")
+        }
+        val request = Request.Builder()
+            .url(checkUrl)
+            .post(requestJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        val response = client.newCall(request).execute()
+        response.use {
+            if (!it.isSuccessful) {
+                return@withContext UpdateCheckResult(
+                    hasUpdate = false,
+                    updateInfo = null,
+                    message = "检查更新失败：${it.code} ${it.message}"
+                )
+            }
+            val body = it.body?.string().orEmpty()
+            if (body.isBlank()) {
+                return@withContext UpdateCheckResult(false, null, "服务端返回为空")
+            }
+            val root = JSONObject(body)
+            val hasUpdateFlag = root.optBoolean("has_update", root.optBoolean("update_available", false))
+            val dataObj = root.optJSONObject("data")
+            val packageObj = root.optJSONObject("package")
+                ?: root.optJSONObject("latest")
+                ?: dataObj?.optJSONObject("package")
+                ?: dataObj?.optJSONObject("latest")
+                ?: root.optJSONArray("packages")?.optJSONObject(0)
+                ?: dataObj?.optJSONArray("packages")?.optJSONObject(0)
+            if (packageObj == null) {
+                return@withContext if (hasUpdateFlag) {
+                    UpdateCheckResult(false, null, "检测到更新标记，但缺少安装包信息")
+                } else {
+                    UpdateCheckResult(false, null, "当前已是最新版本")
+                }
+            }
+            val latestVersionName = packageObj.optString("version_name").ifBlank { root.optString("version_name") }
+            val latestVersionCode = packageObj.optLong("version_code", root.optLong("version_code", -1))
+            val relativePath = packageObj.optString("relative_path")
+            val rawDownloadUrl = packageObj.optString("download_url")
+                .ifBlank { packageObj.optString("url") }
+                .ifBlank { packageObj.optString("package_url") }
+                .ifBlank { relativePath }
+            if (rawDownloadUrl.isBlank()) {
+                return@withContext UpdateCheckResult(false, null, "服务端未返回可下载地址")
+            }
+            val resolvedUrl = resolveDownloadUrl(serviceUrl, rawDownloadUrl)
+            val notes = packageObj.optString("notes")
+            val forceUpdate = packageObj.optBoolean("force_update", false)
+            val versionIsNewer = latestVersionCode > currentVersionCode
+            val shouldUpdate = hasUpdateFlag || versionIsNewer
+            return@withContext if (shouldUpdate) {
+                UpdateCheckResult(
+                    hasUpdate = true,
+                    updateInfo = UpdateInfo(
+                        versionName = latestVersionName.ifBlank { "unknown" },
+                        versionCode = latestVersionCode,
+                        notes = notes,
+                        forceUpdate = forceUpdate,
+                        downloadUrl = resolvedUrl
+                    ),
+                    message = "发现新版本：${latestVersionName.ifBlank { "unknown" }}"
+                )
+            } else {
+                UpdateCheckResult(false, null, "当前已是最新版本")
+            }
+        }
+    }
+
+    fun startApkDownload(context: Context, downloadUrl: String, fileName: String): Long {
+        val request = DownloadManager.Request(Uri.parse(downloadUrl)).apply {
+            setTitle("下载更新")
+            setDescription(fileName)
+            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            setMimeType("application/vnd.android.package-archive")
+            setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
+        }
+        val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        return downloadManager.enqueue(request)
+    }
+
+    fun installDownloadedApk(context: Context, downloadId: Long): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                data = Uri.parse("package:${context.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            return false
+        }
+        val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val fileUri = downloadManager.getUriForDownloadedFile(downloadId) ?: return false
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(fileUri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(installIntent)
+        return true
+    }
+
+    fun downloadFailedReason(context: Context, downloadId: Long): String {
+        val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        val cursor = downloadManager.query(query)
+        cursor.use {
+            if (!it.moveToFirst()) return "下载任务不存在"
+            val statusIndex = it.getColumnIndex(DownloadManager.COLUMN_STATUS)
+            val reasonIndex = it.getColumnIndex(DownloadManager.COLUMN_REASON)
+            val status = if (statusIndex >= 0) it.getInt(statusIndex) else -1
+            val reason = if (reasonIndex >= 0) it.getInt(reasonIndex) else -1
+            return if (status == DownloadManager.STATUS_FAILED) {
+                "下载失败，错误码：$reason"
+            } else {
+                "下载未成功完成"
+            }
+        }
+    }
+}
+
 @Composable
 fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
     val context = LocalContext.current
@@ -426,6 +629,24 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
     var scanLogs by remember { mutableStateOf(listOf<ScanLog>()) }
     var foundServiceUrl by remember { mutableStateOf(sharedPreferences.getString("service_url", null)) }
     var scanJob by remember { mutableStateOf<Job?>(null) }
+    var showUpdateDialog by remember { mutableStateOf(false) }
+    var isCheckingUpdate by remember { mutableStateOf(false) }
+    var isDownloadingUpdate by remember { mutableStateOf(false) }
+    var updateCheckMessage by remember { mutableStateOf("") }
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var activeDownloadId by remember { mutableStateOf<Long?>(null) }
+    var accessibilityEnabled by remember { mutableStateOf(isLockAccessibilityEnabled(context)) }
+    var showAdminPasswordDialog by remember { mutableStateOf(false) }
+    var oldAdminPassword by remember { mutableStateOf("") }
+    var newAdminPassword by remember { mutableStateOf("") }
+    var confirmAdminPassword by remember { mutableStateOf("") }
+    var adminPasswordError by remember { mutableStateOf("") }
+    var showLimitPasswordDialog by remember { mutableStateOf(false) }
+    var showEditLimitDialog by remember { mutableStateOf(false) }
+    var limitPasswordInput by remember { mutableStateOf("") }
+    var limitPasswordError by remember { mutableStateOf("") }
+    var dailyLimitInput by remember { mutableStateOf("") }
+    var dailyLimitError by remember { mutableStateOf("") }
     val fontScale = LocalConfiguration.current.fontScale
     val isLargeFont = fontScale >= 1.15f
     val visibleLogs = if (scanLogs.size > 5) scanLogs.takeLast(5) else scanLogs
@@ -435,11 +656,61 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 foundServiceUrl = sharedPreferences.getString("service_url", null)
+                accessibilityEnabled = isLockAccessibilityEnabled(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    val trackedDownloadId by rememberUpdatedState(activeDownloadId)
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context, intent: Intent) {
+                if (intent.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
+                val completedId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+                val targetId = trackedDownloadId ?: return
+                if (completedId != targetId) return
+                activeDownloadId = null
+                isDownloadingUpdate = false
+                val downloadManager = receiverContext.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                val cursor = downloadManager.query(DownloadManager.Query().setFilterById(completedId))
+                cursor.use {
+                    if (!it.moveToFirst()) {
+                        scanLogs = scanLogs + ScanLog("更新包下载失败：任务不存在", LogType.FAILURE)
+                        android.widget.Toast.makeText(receiverContext, "更新包下载失败：任务不存在", android.widget.Toast.LENGTH_LONG).show()
+                        return
+                    }
+                    val statusIndex = it.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                    val status = if (statusIndex >= 0) it.getInt(statusIndex) else -1
+                    if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                        val startedInstall = MobileUpdateManager.installDownloadedApk(receiverContext, completedId)
+                        if (startedInstall) {
+                            scanLogs = scanLogs + ScanLog("更新包下载完成，正在安装", LogType.SUCCESS)
+                            android.widget.Toast.makeText(receiverContext, "下载完成，正在安装", android.widget.Toast.LENGTH_LONG).show()
+                        } else {
+                            scanLogs = scanLogs + ScanLog("请先允许安装未知来源应用后重试", LogType.INFO)
+                            android.widget.Toast.makeText(receiverContext, "请先允许安装未知来源应用", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    } else {
+                        val reason = MobileUpdateManager.downloadFailedReason(receiverContext, completedId)
+                        scanLogs = scanLogs + ScanLog(reason, LogType.FAILURE)
+                        android.widget.Toast.makeText(receiverContext, reason, android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+        val filter = android.content.IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        onDispose {
+            runCatching { context.unregisterReceiver(receiver) }
         }
     }
     
@@ -658,6 +929,126 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
 
         item {
             Text(
+                "应用更新",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 24.dp, top = 24.dp, bottom = 8.dp)
+            )
+        }
+
+        item {
+            FilledTonalButton(
+                onClick = {
+                    val serviceUrl = foundServiceUrl
+                    if (serviceUrl.isNullOrBlank()) {
+                        val message = "请先连接服务端后再检查更新"
+                        scanLogs = scanLogs + ScanLog(message, LogType.FAILURE)
+                        android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
+                        return@FilledTonalButton
+                    }
+                    showUpdateDialog = true
+                    isCheckingUpdate = true
+                    isDownloadingUpdate = false
+                    updateInfo = null
+                    updateCheckMessage = ""
+                    scope.launch {
+                        val result = runCatching { MobileUpdateManager.checkForUpdate(context, serviceUrl) }
+                        if (result.isSuccess) {
+                            val checkResult = result.getOrThrow()
+                            updateInfo = checkResult.updateInfo
+                            updateCheckMessage = checkResult.message
+                            scanLogs = scanLogs + ScanLog(checkResult.message, if (checkResult.hasUpdate) LogType.SUCCESS else LogType.INFO)
+                        } else {
+                            val error = "检查更新失败：${result.exceptionOrNull()?.message ?: "未知错误"}"
+                            updateInfo = null
+                            updateCheckMessage = error
+                            scanLogs = scanLogs + ScanLog(error, LogType.FAILURE)
+                        }
+                        isCheckingUpdate = false
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                if (isCheckingUpdate) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("检查中...", maxLines = if (isLargeFont) 2 else 1, overflow = TextOverflow.Ellipsis)
+                } else {
+                    Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("检查更新", maxLines = if (isLargeFont) 2 else 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+
+        item {
+            Text(
+                "拦截控制",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 24.dp, top = 24.dp, bottom = 8.dp)
+            )
+        }
+
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (accessibilityEnabled) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.errorContainer
+                    }
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        text = if (accessibilityEnabled) "无障碍拦截已开启" else "无障碍拦截未开启",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (accessibilityEnabled) {
+                            "超额后会拦截除 zenA+ 外的应用"
+                        } else {
+                            "请先开启无障碍服务，否则超额后无法拦截其他应用"
+                        },
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    FilledTonalButton(
+                        onClick = {
+                            context.startActivity(
+                                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (accessibilityEnabled) "去查看无障碍设置" else "去开启无障碍服务")
+                    }
+                }
+            }
+        }
+
+        item {
+            Text(
                 "连接方式",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.primary,
@@ -736,6 +1127,66 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
                 }
             }
         }
+
+        item {
+            Text(
+                "手机时间额度",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 24.dp, top = 24.dp, bottom = 8.dp)
+            )
+        }
+
+        item {
+            FilledTonalButton(
+                onClick = {
+                    showLimitPasswordDialog = true
+                    limitPasswordInput = ""
+                    limitPasswordError = ""
+                    dailyLimitInput = UsageLimitManager.getDailyLimitMinutes(context).toString()
+                    dailyLimitError = ""
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Icon(Icons.Default.Schedule, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("修改今日限额", maxLines = if (isLargeFont) 2 else 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+
+        item {
+            Text(
+                "管理员密码",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 24.dp, top = 24.dp, bottom = 8.dp)
+            )
+        }
+
+        item {
+            FilledTonalButton(
+                onClick = {
+                    showAdminPasswordDialog = true
+                    oldAdminPassword = ""
+                    newAdminPassword = ""
+                    confirmAdminPassword = ""
+                    adminPasswordError = ""
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("修改管理员密码", maxLines = if (isLargeFont) 2 else 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
         
         item {
             Text(
@@ -795,6 +1246,282 @@ fun SettingsScreen(onOpenScanner: () -> Unit = {}) {
             }
         }
     }
+
+    if (showUpdateDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!isDownloadingUpdate) {
+                    showUpdateDialog = false
+                }
+            },
+            title = { Text("检查更新") },
+            text = {
+                when {
+                    isCheckingUpdate -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text("正在检查新版本...")
+                        }
+                    }
+                    updateInfo != null -> {
+                        Column {
+                            Text("发现新版本：${updateInfo!!.versionName}")
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text("版本号：${updateInfo!!.versionCode}")
+                            if (updateInfo!!.notes.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(updateInfo!!.notes)
+                            }
+                        }
+                    }
+                    else -> {
+                        Text(updateCheckMessage.ifBlank { "当前已是最新版本" })
+                    }
+                }
+            },
+            confirmButton = {
+                if (updateInfo != null) {
+                    Button(
+                        onClick = {
+                            val latest = updateInfo ?: return@Button
+                            val fileName = "zenA+${latest.versionName}.apk"
+                            runCatching {
+                                val downloadId = MobileUpdateManager.startApkDownload(context, latest.downloadUrl, fileName)
+                                activeDownloadId = downloadId
+                                isDownloadingUpdate = true
+                                updateCheckMessage = "正在下载更新包..."
+                                scanLogs = scanLogs + ScanLog("开始下载更新：$fileName", LogType.INFO)
+                                android.widget.Toast.makeText(context, "开始下载更新", android.widget.Toast.LENGTH_SHORT).show()
+                            }.onFailure {
+                                val error = "下载启动失败：${it.message ?: "未知错误"}"
+                                scanLogs = scanLogs + ScanLog(error, LogType.FAILURE)
+                                android.widget.Toast.makeText(context, error, android.widget.Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        enabled = !isDownloadingUpdate
+                    ) {
+                        if (isDownloadingUpdate) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("下载中...")
+                        } else {
+                            Text(if (updateInfo!!.forceUpdate) "立即更新" else "更新")
+                        }
+                    }
+                } else {
+                    TextButton(onClick = { showUpdateDialog = false }) {
+                        Text("确定")
+                    }
+                }
+            },
+            dismissButton = {
+                if (updateInfo != null) {
+                    TextButton(
+                        onClick = { showUpdateDialog = false },
+                        enabled = !isDownloadingUpdate
+                    ) {
+                        Text("取消")
+                    }
+                }
+            }
+        )
+    }
+
+    if (showLimitPasswordDialog) {
+        val limitPasswordFocusRequester = remember { FocusRequester() }
+        LaunchedEffect(Unit) {
+            limitPasswordFocusRequester.requestFocus()
+        }
+        AlertDialog(
+            onDismissRequest = { showLimitPasswordDialog = false },
+            title = { Text("输入管理员密码") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = limitPasswordInput,
+                        onValueChange = { limitPasswordInput = it },
+                        singleLine = true,
+                        isError = limitPasswordError.isNotBlank(),
+                        modifier = Modifier.focusRequester(limitPasswordFocusRequester),
+                        label = { Text("密码") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                    )
+                    if (limitPasswordError.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = limitPasswordError,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (limitPasswordInput == UsageLimitManager.getAdminPassword(context)) {
+                            limitPasswordError = ""
+                            showLimitPasswordDialog = false
+                            showEditLimitDialog = true
+                        } else {
+                            limitPasswordError = "密码错误"
+                        }
+                    }
+                ) {
+                    Text("确认")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLimitPasswordDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    if (showEditLimitDialog) {
+        val dailyLimitFocusRequester = remember { FocusRequester() }
+        LaunchedEffect(Unit) {
+            dailyLimitFocusRequester.requestFocus()
+        }
+        AlertDialog(
+            onDismissRequest = { showEditLimitDialog = false },
+            title = { Text("修改今日限额") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = dailyLimitInput,
+                        onValueChange = { dailyLimitInput = it.filter { char -> char.isDigit() } },
+                        singleLine = true,
+                        isError = dailyLimitError.isNotBlank(),
+                        modifier = Modifier.focusRequester(dailyLimitFocusRequester),
+                        label = { Text("限额（分钟）") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "例如：180 表示 3 小时",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (dailyLimitError.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = dailyLimitError,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val minutes = dailyLimitInput.toIntOrNull()
+                        dailyLimitError = when {
+                            minutes == null -> "请输入正确的分钟数"
+                            minutes < 1 -> "分钟数必须大于 0"
+                            minutes > 1440 -> "分钟数不能超过 1440"
+                            else -> ""
+                        }
+                        if (dailyLimitError.isBlank()) {
+                            UsageLimitManager.updateDailyLimitMinutes(context, minutes!!)
+                            val usageDataNow = getDailyUsageStats(context)
+                            UsageLimitManager.updateLockState(context, usageDataNow.totalUsageTime)
+                            showEditLimitDialog = false
+                            scanLogs = scanLogs + ScanLog("今日限额已更新为 ${minutes} 分钟", LogType.SUCCESS)
+                            android.widget.Toast.makeText(context, "今日限额已更新", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Text("保存")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditLimitDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    if (showAdminPasswordDialog) {
+        val adminPasswordFocusRequester = remember { FocusRequester() }
+        LaunchedEffect(Unit) {
+            adminPasswordFocusRequester.requestFocus()
+        }
+        AlertDialog(
+            onDismissRequest = { showAdminPasswordDialog = false },
+            title = { Text("修改管理员密码") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = oldAdminPassword,
+                        onValueChange = { oldAdminPassword = it },
+                        singleLine = true,
+                        modifier = Modifier.focusRequester(adminPasswordFocusRequester),
+                        label = { Text("当前密码") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = newAdminPassword,
+                        onValueChange = { newAdminPassword = it },
+                        singleLine = true,
+                        label = { Text("新密码") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = confirmAdminPassword,
+                        onValueChange = { confirmAdminPassword = it },
+                        singleLine = true,
+                        label = { Text("确认新密码") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                    )
+                    if (adminPasswordError.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = adminPasswordError,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val current = UsageLimitManager.getAdminPassword(context)
+                        adminPasswordError = when {
+                            oldAdminPassword != current -> "当前密码不正确"
+                            newAdminPassword.isBlank() -> "新密码不能为空"
+                            newAdminPassword != confirmAdminPassword -> "两次输入的新密码不一致"
+                            else -> ""
+                        }
+                        if (adminPasswordError.isBlank()) {
+                            UsageLimitManager.updateAdminPassword(context, newAdminPassword)
+                            showAdminPasswordDialog = false
+                            scanLogs = scanLogs + ScanLog("管理员密码已更新", LogType.SUCCESS)
+                            android.widget.Toast.makeText(context, "管理员密码已更新", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Text("保存")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAdminPasswordDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
 }
 
 data class AppUsageInfo(
@@ -809,6 +1536,11 @@ data class UsageStatsData(
     val totalUsageTime: Long
 )
 
+enum class PasswordAction {
+    TEMP_EXTEND,
+    UNLOCK_TODAY
+}
+
 
 
 @Composable
@@ -817,6 +1549,19 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     var hasPermission by remember { mutableStateOf(checkUsageStatsPermission(context)) }
     var usageData by remember { mutableStateOf(UsageStatsData(emptyList(), 0L)) }
+    var remainingMillis by remember { mutableLongStateOf(UsageLimitManager.getRemainingMillis(context, usageData.totalUsageTime)) }
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var showDurationDialog by remember { mutableStateOf(false) }
+    var passwordInput by remember { mutableStateOf("") }
+    var passwordError by remember { mutableStateOf(false) }
+    var selectedExtraMinutes by remember { mutableIntStateOf(30) }
+    var passwordAction by remember { mutableStateOf(PasswordAction.TEMP_EXTEND) }
+    var unlockedToday by remember { mutableStateOf(UsageLimitManager.isUnlockedToday(context)) }
+
+    LaunchedEffect(Unit) {
+        UsageLimitManager.ensureToday(context)
+        unlockedToday = UsageLimitManager.isUnlockedToday(context)
+    }
 
     // Use DisposableEffect to observe lifecycle changes (resume) to auto-refresh data
     DisposableEffect(lifecycleOwner) {
@@ -825,6 +1570,9 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
                 hasPermission = checkUsageStatsPermission(context)
                 if (hasPermission) {
                     usageData = getDailyUsageStats(context)
+                    remainingMillis = UsageLimitManager.getRemainingMillis(context, usageData.totalUsageTime)
+                    UsageLimitManager.updateLockState(context, usageData.totalUsageTime)
+                    unlockedToday = UsageLimitManager.isUnlockedToday(context)
                 }
             }
         }
@@ -838,19 +1586,120 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
     LaunchedEffect(hasPermission) {
         if (hasPermission) {
             usageData = getDailyUsageStats(context)
+            remainingMillis = UsageLimitManager.getRemainingMillis(context, usageData.totalUsageTime)
+            UsageLimitManager.updateLockState(context, usageData.totalUsageTime)
+            unlockedToday = UsageLimitManager.isUnlockedToday(context)
             while (true) {
                 delay(60000) // 1 minute
                 usageData = getDailyUsageStats(context)
+                remainingMillis = UsageLimitManager.getRemainingMillis(context, usageData.totalUsageTime)
+                UsageLimitManager.updateLockState(context, usageData.totalUsageTime)
+                unlockedToday = UsageLimitManager.isUnlockedToday(context)
             }
         }
     }
 
     if (hasPermission) {
+        val baseQuotaMinutes = UsageLimitManager.getDailyLimitMinutes(context) + UsageLimitManager.getTempExtraMinutes(context)
+        val baseQuotaMillis = baseQuotaMinutes * 60_000L
+        val exceededMillis = (usageData.totalUsageTime - baseQuotaMillis).coerceAtLeast(0L)
         Column(
             modifier = modifier
                 .fillMaxSize()
                 .padding(16.dp)
         ) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (remainingMillis >= 0) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.errorContainer
+                    }
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "今日手机剩余使用额度",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (unlockedToday) "今日已解除限制" else formatRemainingDisplay(remainingMillis),
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = if (unlockedToday || remainingMillis >= 0) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onErrorContainer
+                        },
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    if (unlockedToday) {
+                        Text(
+                            text = "今天已解除限制，你可以正常使用手机。",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "今天额度：${formatTime(baseQuotaMillis)}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            text = "今天已使用：${formatTime(usageData.totalUsageTime)}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            text = if (exceededMillis > 0) "今天已超出：${formatTime(exceededMillis)}" else "今天还未超出额度",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                val refreshedUsage = getDailyUsageStats(context)
+                                usageData = refreshedUsage
+                                UsageLimitManager.relockToday(context, refreshedUsage.totalUsageTime)
+                                remainingMillis = UsageLimitManager.getRemainingMillis(context, refreshedUsage.totalUsageTime)
+                                unlockedToday = UsageLimitManager.isUnlockedToday(context)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("重新限制")
+                        }
+                    } else {
+                        Text(
+                            text = "今天额度：${formatTime(baseQuotaMillis)}（含临时增加 ${UsageLimitManager.getTempExtraMinutes(context)} 分钟）",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                passwordAction = PasswordAction.TEMP_EXTEND
+                                showPasswordDialog = true
+                                passwordInput = ""
+                                passwordError = false
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("临时解除")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                passwordAction = PasswordAction.UNLOCK_TODAY
+                                showPasswordDialog = true
+                                passwordInput = ""
+                                passwordError = false
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("今天解除")
+                        }
+                    }
+                }
+            }
             TotalUsageHeader(usageData.totalUsageTime, onOpenHistory)
             Spacer(modifier = Modifier.height(16.dp))
             AppUsageList(usageData.topApps)
@@ -867,6 +1716,117 @@ fun AppUsageScreen(modifier: Modifier = Modifier, onOpenHistory: () -> Unit = {}
                 }
             },
             modifier = modifier
+        )
+    }
+
+    if (showPasswordDialog) {
+        val limitPasswordFocusRequester = remember { FocusRequester() }
+        LaunchedEffect(Unit) {
+            limitPasswordFocusRequester.requestFocus()
+        }
+        AlertDialog(
+            onDismissRequest = { showPasswordDialog = false },
+            title = { Text(if (passwordAction == PasswordAction.TEMP_EXTEND) "输入临时解除密码" else "输入今日解除密码") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        singleLine = true,
+                        isError = passwordError,
+                        modifier = Modifier.focusRequester(limitPasswordFocusRequester),
+                        label = { Text("密码") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                    )
+                    if (passwordError) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "密码错误",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (passwordInput == UsageLimitManager.getAdminPassword(context)) {
+                            passwordError = false
+                            showPasswordDialog = false
+                            if (passwordAction == PasswordAction.TEMP_EXTEND) {
+                                showDurationDialog = true
+                            } else {
+                                UsageLimitManager.unlockToday(context)
+                                val refreshedUsage = getDailyUsageStats(context)
+                                usageData = refreshedUsage
+                                remainingMillis = UsageLimitManager.getRemainingMillis(context, refreshedUsage.totalUsageTime)
+                                UsageLimitManager.updateLockState(context, refreshedUsage.totalUsageTime)
+                                unlockedToday = UsageLimitManager.isUnlockedToday(context)
+                            }
+                        } else {
+                            passwordError = true
+                        }
+                    }
+                ) {
+                    Text("确认")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPasswordDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    if (showDurationDialog) {
+        AlertDialog(
+            onDismissRequest = { showDurationDialog = false },
+            title = { Text("选择临时增加时长") },
+            text = {
+                Column {
+                    listOf(30, 60, 120).forEach { minutes ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = selectedExtraMinutes == minutes,
+                                onClick = { selectedExtraMinutes = minutes }
+                            )
+                            Text(
+                                text = when (minutes) {
+                                    30 -> "30分钟"
+                                    60 -> "1个小时"
+                                    else -> "2个小时"
+                                }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        UsageLimitManager.addTempExtraMinutes(context, selectedExtraMinutes)
+                        val refreshedUsage = getDailyUsageStats(context)
+                        usageData = refreshedUsage
+                        remainingMillis = UsageLimitManager.getRemainingMillis(context, refreshedUsage.totalUsageTime)
+                        UsageLimitManager.updateLockState(context, refreshedUsage.totalUsageTime)
+                        unlockedToday = UsageLimitManager.isUnlockedToday(context)
+                        showDurationDialog = false
+                    }
+                ) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDurationDialog = false }) {
+                    Text("取消")
+                }
+            }
         )
     }
 }
@@ -1083,6 +2043,14 @@ fun formatMinutesOnly(millis: Long): String {
     return "${minutes}分钟"
 }
 
+fun formatRemainingDisplay(millis: Long): String {
+    val absMinutes = kotlin.math.abs(millis) / 60000
+    val hours = absMinutes / 60
+    val minutes = absMinutes % 60
+    val value = if (hours > 0) "${hours}小时${minutes}分钟" else "${minutes}分钟"
+    return if (millis >= 0) value else "已超时$value"
+}
+
 fun checkUsageStatsPermission(context: Context): Boolean {
     val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
     val mode = appOps.checkOpNoThrow(
@@ -1091,6 +2059,15 @@ fun checkUsageStatsPermission(context: Context): Boolean {
         context.packageName
     )
     return mode == AppOpsManager.MODE_ALLOWED
+}
+
+fun isLockAccessibilityEnabled(context: Context): Boolean {
+    val enabledServices = Settings.Secure.getString(
+        context.contentResolver,
+        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+    ) ?: return false
+    val expected = ComponentName(context, LockAccessibilityService::class.java).flattenToString()
+    return enabledServices.split(':').any { it.equals(expected, ignoreCase = true) }
 }
 
 fun calculateUsageTimeWithEvents(context: Context, startTime: Long, endTime: Long): Map<String, Long> {
